@@ -1,0 +1,62 @@
+# Local configuration and credentials
+/.env
+/.env.*
+!.env.example
+/event.json
+*.secret
+*.key
+*.pem
+*.p12
+*.pfx
+*.cookie
+cookies*
+*.ovpn
+known_hosts
+id_rsa
+id_ed25519
+
+# Generated Rookery configuration and operator views
+/START_PROMPT.md
+/STOP_PROMPT.md
+/NEW_CTF_SETUP.md
+/PREPARATION.md
+/ACTIVE_SURFACE.md
+/STATUS.md
+/FINDINGS.md
+/FLAGS.md
+/DEAD_PATHS.md
+/AUTH_PAUSED.md
+/HANDOFF.md
+
+# Live runtime state and evidence
+state/
+control/
+analysis/
+evidence/
+submissions/
+platform/runtime/
+logs/
+captures/
+downloads/
+work/
+writeups/
+research/
+candidates/
+exploit/
+
+# Generated local databases and service state
+knowledge/*.db
+knowledge/*.sqlite
+knowledge/*.sqlite3
+services/**/runtime/
+
+# Language/tool caches
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+.codex-log/
+.DS_Store

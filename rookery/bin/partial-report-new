@@ -1,0 +1,85 @@
+#!/usr/bin/env -S python3 -I -B
+from __future__ import annotations
+import argparse
+import datetime as dt
+import re
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path.cwd()
+UTC = dt.timezone.utc
+SCRIPT_ROOT = Path(__file__).resolve().parents[1]
+if str(SCRIPT_ROOT / "lib") not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+
+from rookery.portable.util import (  # noqa: E402
+    ensure_private_dir as _ensure_private_dir,
+    ensure_private_file as _ensure_private_file,
+)
+
+
+def iso():
+    return dt.datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def stamp():
+    return dt.datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def safe(s):
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(s))[:120] or "item"
+
+
+def private_dir(p: Path):
+    _ensure_private_dir(p)
+
+
+def write_text(p: Path, text: str):
+    _ensure_private_dir(p.parent)
+    _ensure_private_file(p)
+    p.write_text(text, encoding="utf-8")
+    os.chmod(p, 0o600)
+
+
+def main():
+    os.umask(0o077)
+    ap = argparse.ArgumentParser(
+        description="Create a partial-solve report for mixed accepted/rejected/active objectives."
+    )
+    ap.add_argument("challenge")
+    ap.add_argument("--objective", default="partial-objectives")
+    ap.add_argument("--agent-id", default="coordinator")
+    ap.add_argument("--category", default="partial")
+    ap.add_argument("--force", action="store_true")
+    args = ap.parse_args()
+    out = (
+        ROOT
+        / "analysis"
+        / safe(args.category)
+        / f"{safe(args.challenge)}-{stamp()}-{safe(args.objective)}"
+    )
+    private_dir(out)
+    report = out / "REPORT.md"
+    if report.exists() and not args.force:
+        _ensure_private_file(report)
+        print(str(report))
+        return 0
+    tmpl = (
+        (ROOT / "templates/PARTIAL_SOLVE_REPORT.md").read_text(errors="replace")
+        if (ROOT / "templates/PARTIAL_SOLVE_REPORT.md").exists()
+        else "# Partial Solve / Objective Report\n"
+    )
+    txt = (
+        tmpl.replace("challenge/lab/puzzle:", f"challenge/lab/puzzle: {args.challenge}")
+        .replace("objective group:", f"objective group: {args.objective}")
+        .replace("agent:", f"agent: {args.agent_id}")
+    )
+    txt += f"\n\nCreated: {iso()}\n"
+    write_text(report, txt)
+    print(str(report))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,68 @@
+#!/usr/bin/env -S python3 -I -B
+"""Print latest dynamic attempt tuple by challenge/activity."""
+
+from __future__ import annotations
+import argparse
+import json
+from pathlib import Path
+
+ROOT = Path.cwd()
+
+
+def rows():
+    p = ROOT / "state/attempt_registry.jsonl"
+    if not p.exists():
+        return []
+    out = []
+    for line in p.read_text(errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            pass
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("challenge", nargs="?", default="")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+    rs = rows()
+    if args.challenge:
+        rs = [
+            r
+            for r in rs
+            if str(
+                r.get("challenge")
+                or r.get("challenge_id")
+                or r.get("activity_id")
+                or ""
+            )
+            == args.challenge
+        ]
+    latest = {}
+    for r in rs:
+        key = str(
+            r.get("challenge")
+            or r.get("challenge_id")
+            or r.get("activity_id")
+            or "unknown"
+        )
+        latest[key] = r
+    vals = list(latest.values())
+    if args.json:
+        print(json.dumps(vals, indent=2, ensure_ascii=False))
+    else:
+        if not vals:
+            print("no_attempts")
+        for r in vals:
+            print(
+                f"challenge={r.get('challenge') or r.get('challenge_id')} activity={r.get('activity_id')} attempt={r.get('attempt_id')} cluster={r.get('cluster_id')} question={r.get('question_id')} state={r.get('state') or r.get('status')} source={r.get('source')}"
+            )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,97 @@
+{
+    "profile": "fixture",
+    "identity": {
+        "id": "fixture-event",
+        "name": "Rookery Fixture Event",
+        "url": "fixture://event",
+        "starts_at": "unknown",
+        "ends_at": "unknown"
+    },
+    "adapter": {
+        "id": "fixture",
+        "config": {
+            "fixture_path": "adapters/fixture/event.json"
+        }
+    },
+    "capabilities": {
+        "required": [
+            "local_shell",
+            "platform_inventory",
+            "challenge_details",
+            "scoring"
+        ],
+        "optional": [
+            "release_changes",
+            "network",
+            "collaboration"
+        ]
+    },
+    "scope": {
+        "acknowledged": true,
+        "allowed_hosts": [
+            "fixture.invalid",
+            "127.0.0.1",
+            "localhost"
+        ],
+        "allowed_cidrs": [
+            "192.0.2.0/24"
+        ],
+        "allowed_ports": [
+            80,
+            443,
+            31337
+        ],
+        "allowed_protocols": [
+            "http",
+            "https",
+            "tcp"
+        ],
+        "allowed_file_origins": [
+            "fixture://*",
+            "adapters/fixture/*"
+        ],
+        "platform_hosts": [
+            "fixture.invalid"
+        ],
+        "max_attachment_bytes": 1048576,
+        "expires_at": "unknown"
+    },
+    "answer_morphology": {
+        "regex": "FIXTURE\\{[^}]+\\}",
+        "examples": [
+            "FIXTURE{example}"
+        ],
+        "evaluator_weight": 0.2
+    },
+    "authorization": {
+        "default_allowance": 0,
+        "automation_permitted_action_kinds": [
+            "flag",
+            "free_text",
+            "multi_objective",
+            "handle_write",
+            "proof_artifact"
+        ],
+        "manual_exact_approval": true
+    },
+    "scoring": {
+        "completion_mode": "scorer_truth",
+        "action_kinds": [
+            "flag",
+            "free_text",
+            "multi_objective",
+            "handle_write",
+            "proof_artifact",
+            "no_submit_evidence"
+        ]
+    },
+    "surface": {
+        "bundles": [
+            "core",
+            "research",
+            "scoring-review",
+            "writeups",
+            "unstick"
+        ]
+    }
+}

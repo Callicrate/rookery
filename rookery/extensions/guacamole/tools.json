@@ -1,0 +1,92 @@
+[
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded guac contact sheet capability when the selected event surface requires console.",
+      "distinct_contract": "tool:guac-contact-sheet",
+      "evidence": "Rookery optional implementation at extensions/guacamole/bin/guac-contact-sheet; selected only by capability/profile registry fixtures."
+    },
+    "id": "guac-contact-sheet",
+    "path": "extensions/guacamole/bin/guac-contact-sheet",
+    "purpose": "guac contact sheet",
+    "requires_all": [],
+    "requires_any": [
+      "guacamole",
+      "console"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded guac export file capability when the selected event surface requires console.",
+      "distinct_contract": "tool:guac-export-file",
+      "evidence": "Rookery optional implementation at extensions/guacamole/bin/guac-export-file; selected only by capability/profile registry fixtures."
+    },
+    "id": "guac-export-file",
+    "path": "extensions/guacamole/bin/guac-export-file",
+    "purpose": "guac export file",
+    "requires_all": [],
+    "requires_any": [
+      "guacamole",
+      "console"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded guac remote log export capability when the selected event surface requires console.",
+      "distinct_contract": "tool:guac-remote-log-export",
+      "evidence": "Rookery optional implementation at extensions/guacamole/bin/guac-remote-log-export; selected only by capability/profile registry fixtures."
+    },
+    "id": "guac-remote-log-export",
+    "path": "extensions/guacamole/bin/guac-remote-log-export",
+    "purpose": "guac remote log export",
+    "requires_all": [],
+    "requires_any": [
+      "guacamole",
+      "console"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded guac ssh exec capability when the selected event surface requires console.",
+      "distinct_contract": "tool:guac-ssh-exec",
+      "evidence": "Rookery optional implementation at extensions/guacamole/bin/guac-ssh-exec; selected only by capability/profile registry fixtures."
+    },
+    "id": "guac-ssh-exec",
+    "path": "extensions/guacamole/bin/guac-ssh-exec",
+    "purpose": "guac ssh exec",
+    "requires_all": [],
+    "requires_any": [
+      "guacamole",
+      "console"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded guac terminal capture capability when the selected event surface requires console.",
+      "distinct_contract": "tool:guac-terminal-capture",
+      "evidence": "Rookery optional implementation at extensions/guacamole/bin/guac-terminal-capture; selected only by capability/profile registry fixtures."
+    },
+    "id": "guac-terminal-capture",
+    "path": "extensions/guacamole/bin/guac-terminal-capture",
+    "purpose": "guac terminal capture",
+    "requires_all": [],
+    "requires_any": [
+      "guacamole",
+      "console"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded console lease capability when the selected event surface requires console.",
+      "distinct_contract": "tool:console-lease",
+      "evidence": "Rookery optional implementation at extensions/guacamole/bin/console-lease; selected only by capability/profile registry fixtures."
+    },
+    "id": "console-lease",
+    "path": "extensions/guacamole/bin/console-lease",
+    "purpose": "console lease",
+    "requires_all": [],
+    "requires_any": [
+      "guacamole",
+      "console"
+    ]
+  }
+]

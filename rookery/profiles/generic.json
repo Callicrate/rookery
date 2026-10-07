@@ -1,0 +1,128 @@
+{
+  "adapter": {
+    "config": {},
+    "id": "unknown"
+  },
+  "answer_morphology": {
+    "evaluator_weight": 0.2,
+    "examples": [],
+    "regex": "unknown"
+  },
+  "authorization": {
+    "automation_permitted_action_kinds": [],
+    "default_allowance": 0,
+    "manual_exact_approval": true
+  },
+  "capabilities": {
+    "optional": [
+      "platform_inventory",
+      "challenge_details",
+      "release_changes",
+      "session",
+      "network",
+      "collaboration",
+      "scoring"
+    ],
+    "required": [
+      "local_shell"
+    ]
+  },
+  "compute": {
+    "target_percent": 75,
+    "admit_percent": 70,
+    "ceiling_percent": 80,
+    "backoff_percent": 85,
+    "sample_seconds": 1,
+    "admission_cooldown_seconds": 5,
+    "lease_seconds": 30,
+    "default_job_budget_seconds": 1800,
+    "interactive_reserve_units": 2,
+    "total_units": 8
+  },
+  "concurrency": {
+    "max_agent_depth": 2,
+    "max_jobs": 8,
+    "max_subagent_threads": 96,
+    "max_workers": "auto"
+  },
+  "identity": {
+    "ends_at": "unknown",
+    "id": "unknown",
+    "name": "unknown",
+    "starts_at": "unknown",
+    "url": "unknown"
+  },
+  "priority": {
+    "strategy": "balanced",
+    "weights": {
+      "dependency_readiness": 0.7,
+      "evidence_maturity": 1.0,
+      "expected_effort": -0.8,
+      "infrastructure_readiness": 0.7,
+      "lane_age": 0.2,
+      "low_solve_count": 0.4,
+      "operator_override": 2.0,
+      "release_freshness": 1.0,
+      "value": 1.0
+    }
+  },
+  "profile": "generic",
+  "queue": {
+    "automation_enabled": false,
+    "cadence_seconds": 0,
+    "jitter_seconds": 0,
+    "latency_objective_seconds": 0,
+    "watch_interval_seconds": 15
+  },
+  "release": {
+    "model": "static",
+    "poll_seconds": 0
+  },
+  "schema_version": "1",
+  "scope": {
+    "acknowledged": false,
+    "allowed_cidrs": [],
+    "allowed_file_origins": [],
+    "allowed_hosts": [],
+    "allowed_ports": [],
+    "allowed_protocols": [
+      "http",
+      "https",
+      "ssh",
+      "tcp",
+      "udp",
+      "ws",
+      "wss"
+    ],
+    "expires_at": "unknown",
+    "max_attachment_bytes": 0,
+    "platform_hosts": []
+  },
+  "scoring": {
+    "completion_mode": "scorer_truth",
+    "action_kinds": [
+      "no_submit_evidence"
+    ]
+  },
+  "session": {
+    "dynamic_attempts": false,
+    "lifecycle": "none",
+    "required_freshness_seconds": 0
+  },
+  "surface": {
+    "bundles": [
+      "core",
+      "research",
+      "scoring-review",
+      "writeups",
+      "unstick"
+    ],
+    "categories": [],
+    "extensions": []
+  },
+  "writeups": {
+    "full_required_at_closeout": true,
+    "mode": "closeout",
+    "voice_file": "docs/voice.md"
+  }
+}

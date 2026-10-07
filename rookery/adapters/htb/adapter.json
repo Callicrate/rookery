@@ -1,0 +1,37 @@
+{
+  "agents": "agents.json",
+  "class": "HTBAdapter",
+  "docs": "README.md",
+  "environment_schema": [
+    {
+      "name": "ADAPTER_CONFIG_INVENTORY_ARGV",
+      "target": "adapter.config.inventory_argv",
+      "type": "argv"
+    },
+    {
+      "name": "ADAPTER_CONFIG_SUBMIT_ARGV",
+      "target": "adapter.config.submit_argv",
+      "type": "argv"
+    },
+    {
+      "legacy_import": false,
+      "name": "ADAPTER_CONFIG_INVENTORY_ENV_KEYS",
+      "target": "adapter.config.inventory_env_keys",
+      "type": "environment_name_array"
+    },
+    {
+      "legacy_import": false,
+      "name": "ADAPTER_CONFIG_SUBMIT_ENV_KEYS",
+      "target": "adapter.config.submit_env_keys",
+      "type": "environment_name_array"
+    }
+  ],
+  "environment_requirements": {
+    "all": ["ADAPTER_CONFIG_INVENTORY_ARGV", "ADAPTER_CONFIG_SUBMIT_ARGV"]
+  },
+  "env_example": "env.example",
+  "id": "htb",
+  "module": "adapter.py",
+  "profile": "profile.json",
+  "schema_version": "1"
+}

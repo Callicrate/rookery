@@ -1,0 +1,9 @@
+# Project-local Codex settings for an authorized, disposable CTF workspace.
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+[agents]
+# Rookery replaces this bootstrap value with the resolved single-session subagent cap.
+max_concurrent_threads_per_session = 96
+max_depth = 2
+job_max_runtime_seconds = 5400

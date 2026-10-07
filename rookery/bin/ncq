@@ -1,0 +1,210 @@
+#!/usr/bin/env -S python3 -I -B
+"""Run one DNS-pinned, scope-authorized TCP probe through ``runq``.
+
+``nc`` and ``ncat`` normally receive a hostname and perform a second DNS
+lookup while connecting. This wrapper resolves exactly once through the
+compiled Rookery scope, then gives the child only a recorded numeric address.
+It intentionally does not retry a second answer: a netcat child cannot prove
+which fallback peer it reached, so deterministic availability is preferable to
+unattributable fallback.
+"""
+
+from __future__ import annotations
+
+import shutil
+import socket
+import subprocess
+import sys
+import urllib.parse
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "lib") not in sys.path:
+    sys.path.insert(0, str(ROOT / "lib"))
+
+from rookery.portable.adapters import run_bounded_argv  # noqa: E402
+from rookery.portable.environment import (  # noqa: E402
+    EnvClass,
+    EnvKey,
+    EnvironmentPolicyError,
+    build_child_environment,
+    minimal_child_environment,
+    parse_name_array,
+    purpose_policy,
+    read_declared_environment,
+)
+from rookery.portable.network_policy import ExplicitNetworkPolicy  # noqa: E402
+from rookery.portable.scoped_transport import scoped_connection_plan  # noqa: E402
+from rookery.portable.scope import (  # noqa: E402
+    CompiledScopeBinding,
+    load_canonical_compiled_scope,
+)
+
+MAX_SEND_BYTES = 64 * 1024
+NETCAT_TIMEOUT_SECONDS = 20
+NETCAT_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+_NETWORK_CONTROL = (EnvKey("NCQ_NETWORK_ENV_KEYS", EnvClass.ROOKERY_CONFIG),)
+_NETWORK_CLASSES = frozenset({EnvClass.PROXY_CREDENTIAL, EnvClass.CA_TRUST_PATH})
+
+
+def _port(value: str) -> int:
+    if not value.isascii() or not value.isdecimal():
+        raise ValueError("ncq port is invalid")
+    port = int(value)
+    if not 1 <= port <= 65535:
+        raise ValueError("ncq port is invalid")
+    return port
+
+
+def _tcp_url(host: str, port: int) -> str:
+    """Build a parseable textual TCP origin; DNS happens only in the core."""
+
+    if (
+        not isinstance(host, str)
+        or not host
+        or len(host.encode("utf-8")) > 253
+        or any(token in host for token in "/@?#[]")
+    ):
+        raise ValueError("ncq host is invalid")
+    host_part = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    url = f"tcp://{host_part}:{port}"
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "tcp" or not parsed.hostname or parsed.port != port:
+        raise ValueError("ncq host is invalid")
+    return url
+
+
+def _network_policy(root: Path, scope: dict[str, Any]) -> ExplicitNetworkPolicy:
+    """Resolve declared proxy/TLS controls; selected proxies fail before DNS."""
+
+    controls = read_declared_environment(root, _NETWORK_CONTROL)
+    names = parse_name_array(controls.values.get("NCQ_NETWORK_ENV_KEYS"), label="NCQ_NETWORK_ENV_KEYS")
+    environment = build_child_environment(
+        root,
+        policy=purpose_policy("ncq-network", allowed_classes=_NETWORK_CLASSES),
+        pass_names=names,
+    )
+    return ExplicitNetworkPolicy.from_child_environment(environment, scope=scope)
+
+
+def _candidate(plan: Any) -> Any:
+    """Select one retained answer canonically, never a hostname or re-resolution."""
+
+    if not plan.candidates:
+        raise ValueError("ncq has no authorized numeric destination")
+    return min(plan.candidates, key=lambda item: (item.family, int(item.address)))
+
+
+def _netcat_argv(binary: str, candidate: Any, port: int) -> list[str]:
+    if candidate.family == socket.AF_INET:
+        family = "-4"
+    elif candidate.family == socket.AF_INET6:
+        family = "-6"
+    else:
+        raise ValueError("ncq selected address family is invalid")
+    return [binary, "-n", "-v", family, str(candidate.address), str(port)]
+
+
+def _parse(arguments: list[str]) -> tuple[str, int, bytes | None]:
+    if len(arguments) < 2:
+        raise ValueError("usage: ncq <host> <port> [--send text]")
+    host, port_text, *remaining = arguments
+    if not remaining:
+        return host, _port(port_text), None
+    if len(remaining) != 2 or remaining[0] != "--send":
+        raise ValueError("usage: ncq <host> <port> [--send text]")
+    payload = remaining[1].encode("utf-8")
+    if len(payload) > MAX_SEND_BYTES:
+        raise ValueError("ncq send exceeds the byte limit")
+    return host, _port(port_text), payload
+
+
+def _run_with_send(argv: list[str], payload: bytes, environment: Any) -> int:
+    """Feed bounded literal bytes to runq without a shell or hostname argument."""
+
+    process = subprocess.Popen(
+        argv,
+        cwd=ROOT,
+        stdin=subprocess.PIPE,
+        stdout=None,
+        stderr=None,
+        shell=False,
+        start_new_session=True,
+        env=environment.values,
+    )
+    try:
+        process.communicate(payload, timeout=NETCAT_TIMEOUT_SECONDS + 5)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        process.wait(timeout=2)
+        return 124
+    return int(process.returncode)
+
+
+def main(argv: list[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments == ["--help"]:
+        print("usage: ncq <host> <port> [--send text]")
+        print("resolves once inside compiled scope and passes only a pinned numeric address to nc")
+        return 0
+    if arguments == ["--version"]:
+        print("ncq 2")
+        return 0
+    try:
+        host, port, payload = _parse(arguments)
+        binding: CompiledScopeBinding = load_canonical_compiled_scope(ROOT)
+        scope = binding.scope
+        policy = _network_policy(ROOT, scope)
+        # This first validates the textual TCP authority, then asks the route
+        # policy before exactly one DNS lookup and complete-answer authorization.
+        plan = scoped_connection_plan(scope, _tcp_url(host, port), route_policy=policy)
+        selected = _candidate(plan)
+        environment = minimal_child_environment(ROOT, policy_name="ncq")
+        binary = shutil.which("ncat", path=environment.values.get("PATH")) or shutil.which(
+            "nc", path=environment.values.get("PATH")
+        )
+        if not binary:
+            raise RuntimeError("ncq requires ncat or nc")
+        command = _netcat_argv(binary, selected, plan.port)
+        runq = [
+            str(ROOT / "bin" / "runq"),
+            "-t",
+            str(NETCAT_TIMEOUT_SECONDS),
+            "-l",
+            "ncq",
+            "-p",
+            "--scope-generation",
+            str(binding.scope_generation),
+            "--stop-generation",
+            str(binding.stop_generation),
+            "--scope-file-sha256",
+            binding.file_sha256,
+            "--scope-content-sha256",
+            binding.content_sha256,
+            "--launch-binding-sha256",
+            binding.launch_binding_sha256,
+            "--",
+            *command,
+        ]
+        if payload is not None:
+            return _run_with_send(runq, payload, environment)
+        result = run_bounded_argv(
+            runq,
+            cwd=ROOT,
+            timeout=NETCAT_TIMEOUT_SECONDS + 5,
+            max_output_bytes=NETCAT_MAX_OUTPUT_BYTES,
+            env=environment,
+        )
+    except (EnvironmentPolicyError, OSError, RuntimeError, ValueError):
+        print("ncq request could not be completed", file=sys.stderr)
+        return 2
+    sys.stdout.buffer.write(result.stdout)
+    sys.stderr.buffer.write(result.stderr)
+    if result.termination != "exited":
+        return result.returncode if result.returncode else 125
+    return result.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

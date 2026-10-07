@@ -1,0 +1,19 @@
+#!/usr/bin/env -S python3 -I -B
+"""Create a strict, privacy-safe pre-event measurement baseline."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "lib") not in sys.path:
+    sys.path.insert(0, str(ROOT / "lib"))
+
+from rookery.portable.baseline import main  # noqa: E402
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(Path(__file__)))

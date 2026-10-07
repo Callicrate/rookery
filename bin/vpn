@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "${1:-}" in
+  -h|--help)
+    printf '%s\n\n%s\n' \
+      'Rookery-managed VPN lifecycle is unavailable in this release.' \
+      'Establish and stop the VPN through an externally supervised operator workflow.'
+    ;;
+  --version)
+    printf '%s\n' 'rookery-vpn-management-unavailable'
+    ;;
+  *)
+    printf '%s\n' 'vpn_privileged_supervision_unavailable' >&2
+    exit 2
+    ;;
+esac

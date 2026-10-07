@@ -1,0 +1,223 @@
+#!/usr/bin/env -S python3 -I -B
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import shutil
+import signal
+import sys
+from pathlib import Path
+
+ROOT = Path.cwd()
+UTC = dt.timezone.utc
+SCRIPT_ROOT = Path(__file__).resolve().parents[1]
+if str(SCRIPT_ROOT / "lib") not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+
+from rookery.portable.adapters import run_bounded_argv
+from rookery.portable.control import (
+    mutation_guard,
+    process_identity_matches,
+)
+from rookery.portable.environment import (
+    ChildEnvironment,
+    minimal_child_environment,
+)
+from rookery.portable.store import EventStore
+from rookery.portable.util import (
+    ensure_private_dir as _ensure_private_dir,
+)
+from rookery.portable.util import (
+    ensure_private_file as _ensure_private_file,
+)
+from rookery.portable.util import (
+    file_lock,
+)
+
+MAX_PORTS = 32
+MAX_DIAGNOSTIC_BYTES = 64 * 1024
+MAX_LISTENER_ROWS = 128
+MAX_RAW_DIAGNOSTIC_CHARS = 2_048
+
+
+def iso():
+    return dt.datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def stamp():
+    return dt.datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def mkdir(p: Path):
+    _ensure_private_dir(p)
+
+
+def private_file(p: Path):
+    _ensure_private_dir(p.parent)
+    _ensure_private_file(p)
+
+
+def write_text(p: Path, text: str, **kwargs):
+    private_file(p)
+    p.write_text(text, **kwargs)
+    os.chmod(p, 0o600)
+
+
+def jwrite(p: Path, obj):
+    private_file(p)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    write_text(tmp, json.dumps(obj, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+    tmp.replace(p)
+    os.chmod(p, 0o600)
+
+
+def _output_text(value):
+    """Normalize bounded runner output and legacy test doubles."""
+
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value or "")
+
+
+def _ports(value):
+    ports = [part.strip() for part in value.split(",") if part.strip()]
+    if not ports or len(ports) > MAX_PORTS:
+        raise ValueError(f"provide between 1 and {MAX_PORTS} ports")
+    if any(not re.fullmatch(r"[1-9][0-9]{0,4}", port) for port in ports):
+        raise ValueError("ports must be decimal TCP port numbers")
+    if any(int(port) > 65535 for port in ports):
+        raise ValueError("ports must be in the range 1..65535")
+    return ports
+
+
+def _listener_rows(ports, outdir, environment: ChildEnvironment):
+    rows = []
+    if not shutil.which("lsof"):
+        return rows, "lsof unavailable; no listeners were eligible for cleanup"
+    for port in ports:
+        cp = run_bounded_argv(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"],
+            cwd=ROOT,
+            timeout=15,
+            max_output_bytes=MAX_DIAGNOSTIC_BYTES,
+            env=environment,
+        )
+        stdout = _output_text(cp.stdout)
+        stderr = _output_text(cp.stderr)
+        write_text(outdir / f"lsof_{port}.txt",
+            (stdout + stderr)[:MAX_DIAGNOSTIC_BYTES],
+            encoding="utf-8",
+            errors="replace",
+        )
+        for line in stdout.splitlines()[1:]:
+            if len(rows) >= MAX_LISTENER_ROWS:
+                break
+            parts = line.split()
+            if len(parts) >= 2:
+                rows.append(
+                    {
+                        "port": port,
+                        "command": parts[0][:256],
+                        "pid": parts[1],
+                        "raw": line[:MAX_RAW_DIAGNOSTIC_CHARS],
+                    }
+                )
+    return rows, ""
+
+
+def _current_owned_job(store, pid):
+    """Return the one current canonical job for pid, otherwise refuse it."""
+
+    current = store.rebuild().get("current", {})
+    jobs = current.get("jobs", {})
+    matches = [
+        row
+        for row in jobs.values()
+        if row.get("status") == "running" and int(row.get("pid", 0) or 0) == pid
+    ]
+    if len(matches) != 1:
+        return None
+    job = matches[0]
+    required = ("job_id", "pid", "pgid", "process_starttime", "owner_token")
+    if any(not job.get(field) for field in required):
+        return None
+    return job
+
+
+def main():
+    os.umask(0o077)
+    ap = argparse.ArgumentParser(
+        description="Report selected listeners and clean up only verified Rookery-owned jobs."
+    )
+    ap.add_argument("--ports", required=True, help="comma-separated ports")
+    ap.add_argument("--kill", action="store_true")
+    ap.add_argument("--signal", default="TERM")
+    ap.add_argument(
+        "--owner-only",
+        default="",
+        help="legacy diagnostic filter; it never authorizes a signal",
+    )
+    args = ap.parse_args()
+    try:
+        ports = _ports(args.ports)
+    except ValueError as exc:
+        ap.error(str(exc))
+    environment = minimal_child_environment(ROOT, policy_name="stale-port-cleanup")
+    outdir = ROOT / "logs/port_cleanup" / stamp()
+    mkdir(outdir)
+    rows, availability_note = _listener_rows(ports, outdir, environment)
+    killed = []
+    refused = []
+    if args.kill:
+        store = EventStore(ROOT)
+        observed_generation = store.current_stop_generation()
+        signum = getattr(signal, "SIG" + args.signal.upper(), signal.SIGTERM)
+        for r in rows:
+            pid = r.get("pid")
+            if not pid or not str(pid).isdigit():
+                refused.append({"pid": pid or "", "reason": "listener PID is invalid"})
+                continue
+            if args.owner_only and args.owner_only not in r.get("raw", ""):
+                refused.append({"pid": pid, "reason": "legacy diagnostic filter did not match"})
+                continue
+            try:
+                with file_lock(ROOT / "state" / "mutation.lock"):
+                    # The canonical stop barrier and process identity must both
+                    # be current at this exact signal boundary.
+                    mutation_guard(store, observed_generation)
+                    job = _current_owned_job(store, int(pid))
+                    if job is None:
+                        refused.append(
+                            {"pid": pid, "reason": "listener is not one current Rookery job"}
+                        )
+                        continue
+                    if not process_identity_matches(ROOT, job):
+                        refused.append(
+                            {"pid": pid, "reason": "Rookery job identity no longer matches"}
+                        )
+                        continue
+                    os.kill(int(pid), signum)
+                killed.append(pid)
+            except (OSError, RuntimeError, ValueError) as exc:
+                refused.append({"pid": pid, "reason": str(exc)[:512]})
+    rec = {
+        "created_at": iso(),
+        "ports": ports,
+        "kill": args.kill,
+        "owner_only": args.owner_only,
+        "listeners": rows,
+        "killed_pids": killed,
+        "refused": refused,
+        "availability_note": availability_note,
+        "environment": environment.metadata()["environment"],
+    }
+    jwrite(outdir / "summary.json", rec)
+    print(json.dumps(rec, indent=2, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

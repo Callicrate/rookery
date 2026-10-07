@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ACTION="${1:-create}"
+if [[ "$ACTION" == "create" || "$ACTION" == "status" ]]; then
+  shift || true
+  exec "$(dirname "$0")/rookery" lessons "$ACTION" "$@"
+fi
+echo "usage: ./bin/lessons-learned [create|status] [options]" >&2
+exit 2

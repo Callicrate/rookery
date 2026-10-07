@@ -1,0 +1,8 @@
+{
+  "agents": "agents.json",
+  "docs": "README.md",
+  "id": "koth",
+  "overlay": "overlay.json",
+  "schema_version": "1",
+  "tools": "tools.json"
+}

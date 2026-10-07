@@ -1,0 +1,85 @@
+#!/usr/bin/env -S python3 -I -B
+"""Create a byte-safe sidecar transcription template for screenshot/tile evidence."""
+
+from __future__ import annotations
+import argparse
+import datetime as dt
+import os
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path.cwd()
+UTC = dt.timezone.utc
+SCRIPT_ROOT = Path(__file__).resolve().parents[1]
+if str(SCRIPT_ROOT / "lib") not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+
+from rookery.portable.util import (  # noqa: E402
+    ensure_private_dir as _ensure_private_dir,
+    ensure_private_file as _ensure_private_file,
+)
+
+
+def iso():
+    return dt.datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def safe(s):
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(s))[:120] or "screenshot"
+
+
+def private_dir(p: Path):
+    _ensure_private_dir(p)
+
+
+def private_file(p: Path):
+    _ensure_private_dir(p.parent)
+    _ensure_private_file(p)
+
+
+def main():
+    os.umask(0o077)
+    ap = argparse.ArgumentParser(
+        description="Create a sidecar transcription for screenshot-only terminal evidence."
+    )
+    ap.add_argument("image_path")
+    ap.add_argument("--out", default="")
+    ap.add_argument("--context", default="")
+    args = ap.parse_args()
+    img = Path(args.image_path)
+    out = Path(args.out) if args.out else img.with_suffix(img.suffix + ".transcript.md")
+    existed = out.exists()
+    private_file(out)
+    body = f"""# Screenshot / Stream Tile Transcription
+
+created_at: {iso()}
+image_path: {args.image_path}
+context: {args.context}
+transcriber:
+confidence: unknown
+
+## Exact visible text
+
+```text
+
+```
+
+## Ambiguous glyphs / uncertainty
+
+## Byte-safe companion artifacts
+
+List any raw text/json/html/log/terminal transcript that confirms or supersedes this screenshot.
+
+## Interpretation notes
+
+"""
+    if not existed:
+        out.write_text(body, encoding="utf-8")
+        os.chmod(out, 0o600)
+    print(out)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

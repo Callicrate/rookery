@@ -1,0 +1,139 @@
+#!/usr/bin/env -S python3 -I -B
+"""Attach a later independent verifier report to an existing proposal without mutating proposal JSON."""
+
+from __future__ import annotations
+import argparse
+import datetime as dt
+import hashlib
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path.cwd()
+UTC = dt.timezone.utc
+SCRIPT_ROOT = Path(__file__).resolve().parents[1]
+if str(SCRIPT_ROOT / "lib") not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+
+from rookery.portable.util import (  # noqa: E402
+    ensure_private_dir as _ensure_private_dir,
+    ensure_private_file as _ensure_private_file,
+)
+
+
+def iso():
+    return dt.datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def stamp():
+    return dt.datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def mkdir(p):
+    _ensure_private_dir(p)
+
+
+def private_file(p):
+    _ensure_private_dir(p.parent)
+    _ensure_private_file(p)
+
+
+def jread(p, d):
+    try:
+        return json.loads(p.read_text(errors="replace"))
+    except Exception:
+        return d
+
+
+def append_jsonl(p, o):
+    private_file(p)
+    with p.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(o, ensure_ascii=False, sort_keys=True) + "\n")
+    os.chmod(p, 0o600)
+
+
+def jwrite(p, o):
+    private_file(p)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    private_file(tmp)
+    tmp.write_text(json.dumps(o, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+    os.chmod(tmp, 0o600)
+    tmp.replace(p)
+    os.chmod(p, 0o600)
+
+
+def read_jsonl(p):
+    if not p.exists():
+        return []
+    out = []
+    for line in p.read_text(errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            pass
+    return out
+
+
+def all_props():
+    rows = read_jsonl(ROOT / "submissions/proposals/proposals.jsonl") + read_jsonl(
+        ROOT / "submissions/proposals.jsonl"
+    )
+    for p in (ROOT / "submissions/proposals").glob("**/*.json"):
+        d = jread(p, {})
+        if d:
+            rows.append(d)
+    return rows
+
+
+def main():
+    os.umask(0o077)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("proposal_id")
+    ap.add_argument("--verifier-report", required=True)
+    ap.add_argument(
+        "--verdict",
+        choices=[
+            "submit-safe",
+            "not-submit-safe",
+            "needs-more-evidence",
+            "rejected-route",
+        ],
+        required=True,
+    )
+    ap.add_argument("--repro-path", default="")
+    ap.add_argument("--note", default="")
+    args = ap.parse_args()
+    prop = next(
+        (p for p in all_props() if p.get("proposal_id") == args.proposal_id), None
+    )
+    if not prop:
+        raise SystemExit("proposal not found")
+    rec = {
+        "created_at": iso(),
+        "proposal_id": args.proposal_id,
+        "challenge": prop.get("challenge"),
+        "candidate_sha256": hashlib.sha256(
+            str(prop.get("candidate", "")).encode("utf-8", "surrogatepass")
+        ).hexdigest(),
+        "verifier_report": args.verifier_report,
+        "verdict": args.verdict,
+        "repro_path": args.repro_path,
+        "note": args.note,
+    }
+    append_jsonl(ROOT / "submissions/review/verifier_attachments.jsonl", rec)
+    out = (
+        ROOT
+        / "submissions/review/verifier_attachments"
+        / f"{stamp()}-{re.sub(r'[^A-Za-z0-9_.-]+', '_', args.proposal_id)}.json"
+    )
+    jwrite(out, rec)
+    print(out)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

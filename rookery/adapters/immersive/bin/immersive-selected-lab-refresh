@@ -1,0 +1,997 @@
+#!/usr/bin/env -S python3 -I -B
+# ruff: noqa: E402, RUF100
+"""Read-only selected-lab/current-attempt refresh helper.
+
+This helper is intentionally mutation-averse. It refuses GraphQL/command text that
+looks like StartLabAttempt, mutation, reset, submit, complete, claim, kill, write,
+or similar unless the operator passes --allow-mutation for diagnostic replay.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import importlib.util
+import json
+import os
+import re
+import shlex
+import stat
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any, Callable, ContextManager
+
+SOURCE_ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path.cwd()
+UTC = dt.timezone.utc
+sys.path.insert(0, str(SOURCE_ROOT / "lib"))
+
+from rookery.portable.adapters import run_bounded_argv
+from rookery.portable.environment import (
+    ChildEnvironment,
+    EnvClass,
+    EnvironmentPolicyError,
+    EnvKey,
+    build_child_environment,
+    minimal_child_environment,
+    parse_name_array,
+    purpose_policy,
+    read_declared_environment,
+)
+from rookery.portable.scope import (
+    CompiledScopeBinding,
+    ScopeAuthorityError,
+    check_url,
+    load_canonical_compiled_scope,
+    open_scoped_url,
+    verified_canonical_scope_effect,
+    verify_canonical_compiled_scope_binding,
+)
+from rookery.portable.optional_helper import require_bound_runtime_workspace
+
+
+def _load_immersive_module(name: str):
+    """Load one colocated helper without admitting its directory to sys.path."""
+
+    path = SOURCE_ROOT / "adapters" / "immersive" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"_rookery_immersive_{name}", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("unable to load required Immersive helper module")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_network_policy = _load_immersive_module("network_policy")
+_path_policy = _load_immersive_module("path_policy")
+resolve_network_policy = _network_policy.resolve_network_policy
+ImmersiveOutputError = _path_policy.ImmersiveOutputError
+preflight_immersive_output = _path_policy.preflight_immersive_output
+prepare_immersive_output = _path_policy.prepare_immersive_output
+write_private_output_file = _path_policy.write_private_output_file
+
+DEFAULT_MAX_BYTES = 8 * 1024 * 1024
+MAX_BYTES = 64 * 1024 * 1024
+DEFAULT_COOKIE_SOURCE_BYTES = 2 * 1024 * 1024
+MAX_COOKIE_SOURCE_BYTES = 8 * 1024 * 1024
+DEFAULT_COOKIE_COUNT = 4_096
+MAX_COOKIE_COUNT = 16_384
+DEFAULT_COOKIE_HEADER_BYTES = 64 * 1024
+MAX_COOKIE_HEADER_BYTES = 256 * 1024
+MAX_COOKIE_FIELD_BYTES = 8 * 1024
+_COOKIE_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+_EFFECT_BINDING: CompiledScopeBinding | None = None
+_SAFE_RESPONSE_HEADERS = frozenset(
+    {
+        "cache-control",
+        "content-length",
+        "content-type",
+        "date",
+        "etag",
+        "last-modified",
+        "retry-after",
+        "server",
+        "x-request-id",
+    }
+)
+_SENSITIVE_RESPONSE_HEADERS = frozenset(
+    {
+        "authorization",
+        "cookie",
+        "proxy-authorization",
+        "set-cookie",
+        "www-authenticate",
+    }
+)
+
+
+class CookieSourceError(RuntimeError):
+    """A safe-to-report refusal that never exposes cookie values."""
+
+
+def _bounded_error(error: BaseException, maximum: int = 512) -> str:
+    value = str(error).replace("\r", " ").replace("\n", " ").strip()
+    return value.encode("utf-8", errors="replace")[:maximum].decode(
+        "utf-8", errors="ignore"
+    )
+
+
+def _validate_limit(name: str, value: int, maximum: int) -> int:
+    if value <= 0 or value > maximum:
+        raise ValueError(f"{name} is outside the supported range")
+    return value
+
+
+def iso():
+    return dt.datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def stamp():
+    return dt.datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def private_write_bytes(p: Path, data: bytes):
+    if _EFFECT_BINDING is None:
+        write_private_output_file(p, data)
+        return
+    with _scope_effect(_EFFECT_BINDING):
+        write_private_output_file(p, data)
+
+
+def private_write_text(p: Path, text: str, *, errors: str = "strict"):
+    private_write_bytes(p, text.encode("utf-8", errors=errors))
+
+
+def guard_output(output) -> bool:
+    try:
+        output.guard()
+    except ImmersiveOutputError:
+        print("Immersive output directory changed or is no longer owned", file=sys.stderr)
+        return False
+    return True
+
+
+def jwrite(p: Path, obj):
+    private_write_text(
+        p,
+        json.dumps(obj, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+    )
+
+
+_IMMERSIVE_ENV_KEYS = (
+    EnvKey("IMMERSIVE_SELECTED_LAB_QUERY", EnvClass.ROOKERY_CONFIG),
+    EnvKey("IMMERSIVE_SELECTED_LAB_REFRESH_COMMAND", EnvClass.ROOKERY_CONFIG),
+    EnvKey("IMMERSIVE_SELECTED_LAB_REFRESH_ARGV", EnvClass.ROOKERY_CONFIG),
+    EnvKey("IMMERSIVE_SELECTED_LAB_REFRESH_ENV_KEYS", EnvClass.ROOKERY_CONFIG),
+    EnvKey("IMMERSIVE_NETWORK_ENV_KEYS", EnvClass.ROOKERY_CONFIG),
+    EnvKey("IMMERSIVE_GRAPHQL_URL", EnvClass.ROOKERY_CONFIG),
+    EnvKey("IMMERSIVE_COOKIES_FILE", EnvClass.SESSION_SECRET_REF),
+    EnvKey("COOKIES_LATEST", EnvClass.SESSION_SECRET_REF),
+    EnvKey("PLATFORM_COOKIES_FILE", EnvClass.SESSION_SECRET_REF),
+    EnvKey("COOKIES_FILE", EnvClass.SESSION_SECRET_REF),
+)
+
+
+def read_env():
+    """Resolve only fixed helper references from the supplied child mapping."""
+
+    return dict(read_declared_environment(ROOT, _IMMERSIVE_ENV_KEYS).values)
+
+
+def run(
+    argv: list[str],
+    timeout: int = 120,
+    max_output_bytes: int = DEFAULT_MAX_BYTES,
+    environment: ChildEnvironment | None = None,
+    spawn_guard: Callable[[], ContextManager[Any]] | None = None,
+    continuation_guard: Callable[[], None] | None = None,
+):
+    """Run a helper with either its exact policy or the inert minimal policy."""
+
+    result = run_bounded_argv(
+        argv,
+        cwd=ROOT,
+        timeout=timeout,
+        max_output_bytes=max_output_bytes,
+        env=environment
+        or minimal_child_environment(ROOT, policy_name="immersive-helper-command"),
+        spawn_guard=spawn_guard,
+        continuation_guard=continuation_guard,
+    )
+    return {
+        "returncode": result.returncode,
+        "termination": result.termination,
+        "stdout": result.stdout.decode("utf-8", errors="replace"),
+        "stderr": result.stderr.decode("utf-8", errors="replace"),
+        "environment": result.environment,
+    }
+
+
+def fill_argv(template: object, vals: dict[str, str]) -> list[str]:
+    if (
+        not isinstance(template, list)
+        or not template
+        or len(template) > 128
+        or any(
+            not isinstance(argument, str) or not argument or len(argument) > 8_192
+            for argument in template
+        )
+    ):
+        raise ValueError("refresh argv must be a bounded non-empty string array")
+    fields = {**vals, **{key.replace("_", "-"): value for key, value in vals.items()}}
+    rendered = []
+    for argument in template:
+        names = set(re.findall(r"\{([A-Za-z_][A-Za-z0-9_-]*)\}", argument))
+        if names - set(fields):
+            raise ValueError("refresh argv contains an unknown placeholder")
+        rendered.append(
+            re.sub(
+                r"\{([A-Za-z_][A-Za-z0-9_-]*)\}",
+                lambda match: fields[match.group(1)],
+                argument,
+            )
+        )
+    return rendered
+
+
+def read_bounded(response: object, maximum: int) -> bytes:
+    if maximum <= 0 or maximum > MAX_BYTES:
+        raise ValueError("response limit is outside supported range")
+    raw = response.read(maximum + 1)
+    if len(raw) > maximum:
+        raise RuntimeError("refresh response exceeds configured byte limit")
+    return raw
+
+
+def _binding_fields(binding: CompiledScopeBinding) -> dict[str, int | str]:
+    return {
+        "scope_generation": binding.scope_generation,
+        "stop_generation": binding.stop_generation,
+        "file_sha256": binding.file_sha256,
+        "content_sha256": binding.content_sha256,
+        "launch_binding_sha256": binding.launch_binding_sha256,
+    }
+
+
+def _verify_effect_binding(binding: CompiledScopeBinding) -> CompiledScopeBinding:
+    return verify_canonical_compiled_scope_binding(
+        ROOT,
+        **_binding_fields(binding),
+    )
+
+
+def _scope_effect(binding: CompiledScopeBinding):
+    return verified_canonical_scope_effect(
+        ROOT,
+        **_binding_fields(binding),
+    )
+
+
+def _activate_effect_binding(binding: CompiledScopeBinding) -> None:
+    global _EFFECT_BINDING
+    _EFFECT_BINDING = binding
+
+
+def scope_guard_url(url: str) -> CompiledScopeBinding:
+    """Load and check the canonical compiled scope before connector access."""
+
+    binding = load_canonical_compiled_scope(ROOT)
+    decision = check_url(binding.scope, url, platform=True)
+    if not decision.allowed:
+        raise RuntimeError(f"HTTP request blocked by scope: {decision.reason}")
+    return binding
+
+
+def privacy_safe_response_headers(headers: Any) -> dict[str, str]:
+    """Persist only a small allowlist; session-bearing headers are redacted."""
+
+    if not headers:
+        return {}
+    try:
+        items = headers.items()
+    except AttributeError:
+        return {}
+    safe: dict[str, str] = {}
+    for raw_name, raw_value in items:
+        name = str(raw_name).strip().lower()
+        if name in _SENSITIVE_RESPONSE_HEADERS:
+            safe[name] = "[redacted]"
+        elif name in _SAFE_RESPONSE_HEADERS:
+            value = str(raw_value).replace("\r", " ").replace("\n", " ").strip()
+            encoded = value.encode("utf-8", errors="replace")
+            safe[name] = encoded[:512].decode("utf-8", errors="ignore")
+    return dict(sorted(safe.items()))
+
+
+def _read_cookie_source(path: Path, maximum: int) -> bytes:
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        raise CookieSourceError("cookie source is unavailable") from exc
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+    ):
+        raise CookieSourceError("cookie source must be a regular non-symlink file")
+    if info.st_size > maximum:
+        raise CookieSourceError("cookie source exceeds configured byte limit")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+            or opened.st_size > maximum
+        ):
+            raise CookieSourceError("cookie source exceeds configured byte limit")
+        data = bytearray()
+        while True:
+            chunk = os.read(descriptor, min(64 * 1024, maximum + 1 - len(data)))
+            if not chunk:
+                return bytes(data)
+            data.extend(chunk)
+            if len(data) > maximum:
+                raise CookieSourceError("cookie source exceeds configured byte limit")
+    except OSError as exc:
+        raise CookieSourceError("cookie source cannot be opened safely") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _cookie_records(raw: bytes, maximum: int) -> list[dict[str, Any]]:
+    stripped = raw.lstrip(b"\xef\xbb\xbf \t\r\n")
+    if stripped.startswith((b"{", b"[")):
+        try:
+            parsed = json.loads(raw.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CookieSourceError("cookie source is not valid JSON") from exc
+        records: list[dict[str, Any]] = []
+        stack = [parsed]
+        node_limit = maximum * 16
+        nodes = 0
+        while stack:
+            item = stack.pop()
+            nodes += 1
+            if nodes > node_limit:
+                raise CookieSourceError(
+                    "cookie source structure exceeds configured limit"
+                )
+            if isinstance(item, dict):
+                if "name" in item and "value" in item:
+                    records.append(item)
+                    if len(records) > maximum:
+                        raise CookieSourceError("cookie source has too many cookies")
+                else:
+                    stack.extend(reversed(tuple(item.values())))
+            elif isinstance(item, list):
+                stack.extend(reversed(item))
+        return records
+    records: list[dict[str, Any]] = []
+    for line in raw.splitlines():
+        if not line or line.startswith(b"#"):
+            continue
+        fields = line.split(b"\t")
+        if len(fields) != 7:
+            raise CookieSourceError("cookie source must be a structured cookie export")
+        try:
+            domain, domain_flag, path, secure, expires, name, value = (
+                field.decode("utf-8") for field in fields
+            )
+        except UnicodeDecodeError as exc:
+            raise CookieSourceError("cookie source is not valid UTF-8") from exc
+        records.append(
+            {
+                "name": name,
+                "value": value,
+                "domain": domain,
+                "path": path,
+                "secure": secure.casefold() == "true",
+                "hostOnly": domain_flag.casefold() != "true",
+                "expires": expires,
+            }
+        )
+        if len(records) > maximum:
+            raise CookieSourceError("cookie source has too many cookies")
+    return records
+
+
+def _cookie_text(value: object, label: str) -> str:
+    if not isinstance(value, str):
+        raise CookieSourceError(f"cookie {label} is invalid")
+    if len(value.encode("utf-8", errors="replace")) > MAX_COOKIE_FIELD_BYTES:
+        raise CookieSourceError(f"cookie {label} exceeds configured byte limit")
+    return value
+
+
+def _normalized_cookie_host(value: str) -> str:
+    candidate = value.rstrip(".").casefold()
+    if not candidate:
+        raise CookieSourceError("cookie domain is invalid")
+    try:
+        return candidate.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise CookieSourceError("cookie domain is invalid") from exc
+
+
+def _cookie_path_matches(cookie_path: str, target_path: str) -> bool:
+    return cookie_path == target_path or (
+        target_path.startswith(cookie_path)
+        and (
+            cookie_path.endswith("/")
+            or (
+                len(target_path) > len(cookie_path)
+                and target_path[len(cookie_path)] == "/"
+            )
+        )
+    )
+
+
+def _cookie_expired(value: object) -> bool:
+    if value in (None, "", False, 0, "0"):
+        return False
+    try:
+        return float(value) <= dt.datetime.now(UTC).timestamp()
+    except (TypeError, ValueError):
+        return True
+
+
+def cookie_header_for_url(
+    source: Path,
+    destination_url: str,
+    *,
+    max_source_bytes: int = DEFAULT_COOKIE_SOURCE_BYTES,
+    max_cookies: int = DEFAULT_COOKIE_COUNT,
+    max_header_bytes: int = DEFAULT_COOKIE_HEADER_BYTES,
+) -> str:
+    """Return only cookie pairs valid for the normalized destination URL."""
+
+    _validate_limit("cookie source bytes", max_source_bytes, MAX_COOKIE_SOURCE_BYTES)
+    _validate_limit("cookie count", max_cookies, MAX_COOKIE_COUNT)
+    _validate_limit("cookie header bytes", max_header_bytes, MAX_COOKIE_HEADER_BYTES)
+    parsed = urllib.parse.urlsplit(destination_url)
+    if parsed.scheme.casefold() not in {"http", "https", "ws", "wss"}:
+        raise CookieSourceError("cookie destination has an unsupported scheme")
+    if parsed.username is not None or parsed.password is not None:
+        raise CookieSourceError("cookie destination must not include credentials")
+    destination_host = _normalized_cookie_host(parsed.hostname or "")
+    destination_path = parsed.path or "/"
+    secure_destination = parsed.scheme.casefold() in {"https", "wss"}
+    selected: list[tuple[int, int, str]] = []
+    for index, item in enumerate(
+        _cookie_records(_read_cookie_source(source, max_source_bytes), max_cookies)
+    ):
+        name = _cookie_text(item.get("name"), "name")
+        value = _cookie_text(item.get("value"), "value")
+        raw_domain = _cookie_text(item.get("domain", ""), "domain")
+        cookie_path = _cookie_text(item.get("path", "/"), "path") or "/"
+        if not _COOKIE_NAME.fullmatch(name) or any(char in value for char in "\r\n;"):
+            raise CookieSourceError("cookie name or value is unsafe")
+        if not cookie_path.startswith("/"):
+            raise CookieSourceError("cookie path is invalid")
+        cookie_host = _normalized_cookie_host(raw_domain.lstrip("."))
+        host_only = bool(item.get("hostOnly", not raw_domain.startswith(".")))
+        domain_matches = (
+            destination_host == cookie_host
+            if host_only
+            else destination_host == cookie_host
+            or destination_host.endswith("." + cookie_host)
+        )
+        if (
+            not domain_matches
+            or not _cookie_path_matches(cookie_path, destination_path)
+            or (bool(item.get("secure")) and not secure_destination)
+            or _cookie_expired(item.get("expires"))
+        ):
+            continue
+        selected.append((-len(cookie_path), index, f"{name}={value}"))
+    selected.sort()
+    pairs: list[str] = []
+    total = 0
+    for _path_length, _index, pair in selected:
+        pair_bytes = len(pair.encode("utf-8", errors="replace"))
+        prospective = total + pair_bytes + (2 if pairs else 0)
+        if prospective > max_header_bytes:
+            raise CookieSourceError("cookie header exceeds configured byte limit")
+        pairs.append(pair)
+        total = prospective
+    return "; ".join(pairs)
+
+
+def open_scoped(
+    binding: CompiledScopeBinding | None,
+    request: urllib.request.Request,
+    *,
+    timeout: int,
+    network: Any,
+):
+    """Open only through the shared scope and declared network policy.
+
+    The core transport pins the authorized DNS answer to its socket and lets
+    ``open_scoped_url`` validate every redirect.  The injected entrypoint stays
+    a test seam without reintroducing an adapter-local resolver.
+    """
+
+    if binding is None:
+        raise RuntimeError("selected-lab refresh has no canonical scope binding")
+    transport = network.scoped_transport(binding.scope, platform=True)
+    # Route-policy refusal (notably a selected proxy) happens before the first
+    # DNS/socket effect and before any refresh evidence is written.
+    transport.preflight_url(request.full_url)
+    return open_scoped_url(
+        binding.scope,
+        request,
+        timeout=timeout,
+        platform=True,
+        transport=transport,
+    )
+
+
+def mutation_check(text: str, outdir: Path, allow: bool) -> bool:
+    p = outdir / "mutation-audit-input.txt"
+    private_write_text(p, text, errors="replace")
+    cp = run(
+        ["./bin/mutation-audit", str(p), "--json"]
+        + (["--allow-mutation"] if allow else []),
+        timeout=30,
+    )
+    private_write_text(
+        outdir / "mutation-audit.json",
+        cp["stdout"] or cp["stderr"],
+        errors="replace",
+    )
+    return cp["returncode"] == 0 and cp["termination"] == "exited"
+
+
+def default_query(env: dict) -> str:
+    q = (env.get("IMMERSIVE_SELECTED_LAB_QUERY") or "").strip()
+    if q:
+        return q
+    return """query SelectedLabRefresh($activityId: ID, $attemptId: ID) {
+  viewer { id }
+  selectedLab(activityId: $activityId, attemptId: $attemptId) {
+    id
+    activityId
+    attemptId
+    state
+    status
+    questions { id state status }
+    clusters { id state status }
+  }
+}"""
+
+
+def _main() -> int:
+    os.umask(0o077)
+    ap = argparse.ArgumentParser(
+        description="Read-only selected lab/current attempt refresh. Never starts new attempts by default."
+    )
+    ap.add_argument("--challenge", default="")
+    ap.add_argument("--activity-id", default="")
+    ap.add_argument("--attempt-id", default="")
+    ap.add_argument("--cluster-id", default="")
+    ap.add_argument("--question-id", default="")
+    ap.add_argument("--outdir", default="")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--max-response-bytes", type=int, default=DEFAULT_MAX_BYTES)
+    ap.add_argument("--max-command-output-bytes", type=int, default=DEFAULT_MAX_BYTES)
+    ap.add_argument(
+        "--max-cookie-source-bytes",
+        type=int,
+        default=DEFAULT_COOKIE_SOURCE_BYTES,
+    )
+    ap.add_argument("--max-cookies", type=int, default=DEFAULT_COOKIE_COUNT)
+    ap.add_argument(
+        "--max-cookie-header-bytes",
+        type=int,
+        default=DEFAULT_COOKIE_HEADER_BYTES,
+    )
+    ap.add_argument(
+        "--allow-mutation",
+        action="store_true",
+        help="diagnostic override; should not be used for normal refresh",
+    )
+    args = ap.parse_args()
+    require_bound_runtime_workspace(ROOT)
+    if args.allow_mutation:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "status": "canonical-executor-required",
+                    "error": "mutation override is disabled for this read-only helper",
+                },
+                indent=2,
+            )
+        )
+        return 3
+    try:
+        _validate_limit("response byte limit", args.max_response_bytes, MAX_BYTES)
+        _validate_limit(
+            "command output byte limit", args.max_command_output_bytes, MAX_BYTES
+        )
+        _validate_limit(
+            "cookie source byte limit",
+            args.max_cookie_source_bytes,
+            MAX_COOKIE_SOURCE_BYTES,
+        )
+        _validate_limit("cookie count", args.max_cookies, MAX_COOKIE_COUNT)
+        _validate_limit(
+            "cookie header byte limit",
+            args.max_cookie_header_bytes,
+            MAX_COOKIE_HEADER_BYTES,
+        )
+    except ValueError as exc:
+        ap.error(str(exc))
+    try:
+        output_plan = preflight_immersive_output(
+            ROOT,
+            family_parts=("evidence", "immersive"),
+            raw_outdir=args.outdir,
+            default_label="selected-lab-refresh",
+        )
+    except ImmersiveOutputError:
+        print("Immersive output directory is invalid or not owned", file=sys.stderr)
+        return 2
+    try:
+        env = read_env()
+        legacy_command = (
+            env.get("IMMERSIVE_SELECTED_LAB_REFRESH_COMMAND") or ""
+        ).strip()
+        argv_json = (env.get("IMMERSIVE_SELECTED_LAB_REFRESH_ARGV") or "").strip()
+        command_template: object | None = None
+        command_environment: ChildEnvironment | None = None
+        if argv_json:
+            command_template = json.loads(argv_json)
+            # Validate the configured shape and placeholders before creating
+            # evidence or a process.  The real private output path is rendered
+            # only after the caller's output directory is known.
+            fill_argv(
+                command_template,
+                {
+                    "challenge": args.challenge,
+                    "challenge_id": args.challenge,
+                    "activity_id": args.activity_id,
+                    "attempt_id": args.attempt_id,
+                    "cluster_id": args.cluster_id,
+                    "question_id": args.question_id,
+                    "outdir": "<private-output>",
+                },
+            )
+            command_environment = build_child_environment(
+                ROOT,
+                policy=purpose_policy("immersive-selected-lab-refresh"),
+                pass_names=parse_name_array(
+                    env.get("IMMERSIVE_SELECTED_LAB_REFRESH_ENV_KEYS"),
+                    label="IMMERSIVE_SELECTED_LAB_REFRESH_ENV_KEYS",
+                ),
+            )
+    except (EnvironmentPolicyError, ValueError, json.JSONDecodeError):
+        print("Immersive refresh configuration is invalid", file=sys.stderr)
+        return 2
+    gql = (env.get("IMMERSIVE_GRAPHQL_URL") or "").strip()
+    query = default_query(env)
+    network = None
+    binding = None
+    if not legacy_command and not argv_json and gql:
+        if len(query.encode("utf-8", errors="replace")) > args.max_response_bytes:
+            print("Immersive refresh query exceeds the configured byte limit", file=sys.stderr)
+            return 1
+        try:
+            binding = scope_guard_url(gql)
+            network = resolve_network_policy(
+                ROOT, env.get("IMMERSIVE_NETWORK_ENV_KEYS")
+            )
+            network.scoped_transport(binding.scope, platform=True).preflight_url(gql)
+        except ScopeAuthorityError:
+            print("canonical scope authority is unavailable", file=sys.stderr)
+            return 4
+        except EnvironmentPolicyError:
+            print("Immersive network configuration is invalid", file=sys.stderr)
+            return 2
+        except (OSError, RuntimeError, TypeError, ValueError):
+            print("Immersive refresh URL is outside declared scope", file=sys.stderr)
+            return 1
+    else:
+        try:
+            binding = load_canonical_compiled_scope(ROOT)
+        except ScopeAuthorityError:
+            print("canonical scope authority is unavailable", file=sys.stderr)
+            return 4
+    assert binding is not None
+    _activate_effect_binding(binding)
+    try:
+        with _scope_effect(binding):
+            output = prepare_immersive_output(
+                ROOT,
+                family_parts=("evidence", "immersive"),
+                raw_outdir="",
+                default_label="selected-lab-refresh",
+                plan=output_plan,
+            )
+    except ImmersiveOutputError:
+        print("Immersive output directory is invalid or not owned", file=sys.stderr)
+        return 2
+    outdir = output.path
+    execution_vals = {
+        "challenge": args.challenge,
+        "challenge_id": args.challenge,
+        "activity_id": args.activity_id,
+        "attempt_id": args.attempt_id,
+        "cluster_id": args.cluster_id,
+        "question_id": args.question_id,
+        "outdir": str(outdir),
+    }
+    vals = {**execution_vals, "outdir": output.metadata_path}
+    rec = {"created_at": iso(), "outdir": output.metadata_path, **vals, "mode": "unknown"}
+    jwrite(outdir / "request_meta.json", rec)
+
+    if legacy_command:
+        rec.update(
+            {
+                "ok": False,
+                "status": "legacy-shell-template-disabled",
+                "hint": "Use IMMERSIVE_SELECTED_LAB_REFRESH_ARGV as a JSON argv array.",
+            }
+        )
+        jwrite(outdir / "summary.json", rec)
+        print(json.dumps(rec, indent=2))
+        return 2
+    if argv_json:
+        assert command_template is not None
+        assert command_environment is not None
+        rendered = fill_argv(
+            command_template, {key: str(value) for key, value in execution_vals.items()}
+        )
+        metadata_argv = [
+            value.replace(str(outdir), output.metadata_path) for value in rendered
+        ]
+        rec["mode"] = "command"
+        rec["command_argv"] = metadata_argv
+        rec["command_environment"] = command_environment.metadata()["environment"]
+        jwrite(outdir / "request_meta.json", rec)
+        if not guard_output(output):
+            return 2
+        if not mutation_check(shlex.join(rendered), outdir, False):
+            rec.update({"ok": False, "status": "refused-mutating-command"})
+            jwrite(outdir / "summary.json", rec)
+            print(json.dumps(rec, indent=2))
+            return 3
+        if args.dry_run:
+            rec.update({"ok": True, "dry_run": True, "would_run": metadata_argv})
+            jwrite(outdir / "summary.json", rec)
+            print(json.dumps(rec, indent=2))
+            return 0
+        if not guard_output(output):
+            return 2
+        _verify_effect_binding(binding)
+        cp = run(
+            rendered,
+            timeout=180,
+            max_output_bytes=args.max_command_output_bytes,
+            environment=command_environment,
+            spawn_guard=lambda: _scope_effect(binding),
+            continuation_guard=lambda: _verify_effect_binding(binding),
+        )
+        if not guard_output(output):
+            return 2
+        private_write_text(outdir / "stdout.log", cp["stdout"], errors="replace")
+        private_write_text(outdir / "stderr.log", cp["stderr"], errors="replace")
+        rec.update(
+            {
+                "ok": cp["returncode"] == 0 and cp["termination"] == "exited",
+                "returncode": cp["returncode"],
+                "termination": cp["termination"],
+                "stdout_path": f"{output.metadata_path}/stdout.log",
+                "stderr_path": f"{output.metadata_path}/stderr.log",
+                "command_environment": cp["environment"],
+            }
+        )
+        try:
+            command_response = json.loads(cp["stdout"])
+        except (TypeError, ValueError):
+            command_response = None
+        else:
+            jwrite(outdir / "response.json", command_response)
+        jwrite(outdir / "summary.json", rec)
+        print(json.dumps(rec, indent=2))
+        return cp["returncode"] if rec["ok"] else 1
+
+    if len(query.encode("utf-8", errors="replace")) > args.max_response_bytes:
+        rec.update(
+            {
+                "ok": False,
+                "status": "input_limit",
+                "error": "GraphQL query exceeds configured byte limit",
+            }
+        )
+        jwrite(outdir / "summary.json", rec)
+        print(json.dumps(rec, indent=2))
+        return 1
+    if not gql:
+        rec.update(
+            {
+                "ok": False,
+                "status": "not-configured",
+                "hint": "Set IMMERSIVE_SELECTED_LAB_REFRESH_ARGV or IMMERSIVE_GRAPHQL_URL/IMMERSIVE_SELECTED_LAB_QUERY.",
+            }
+        )
+        jwrite(outdir / "summary.json", rec)
+        print(json.dumps(rec, indent=2))
+        return 2
+    if network is None:
+        raise RuntimeError("validated Immersive GraphQL transport is unavailable")
+    rec["mode"] = "graphql"
+    rec["graphql_url"] = gql
+    rec["query"] = query
+    rec["network_environment"] = network.metadata()
+    jwrite(outdir / "request_meta.json", rec)
+    if not guard_output(output):
+        return 2
+    if not mutation_check(query, outdir, args.allow_mutation):
+        rec.update({"ok": False, "status": "refused-mutating-query"})
+        jwrite(outdir / "summary.json", rec)
+        print(json.dumps(rec, indent=2))
+        return 3
+    if args.dry_run:
+        rec.update({"ok": True, "dry_run": True})
+        jwrite(outdir / "summary.json", rec)
+        print(json.dumps(rec, indent=2))
+        return 0
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "rookery/read-only-refresh",
+    }
+    cookie_source = (
+        env.get("IMMERSIVE_COOKIES_FILE")
+        or env.get("COOKIES_LATEST")
+        or env.get("PLATFORM_COOKIES_FILE")
+        or env.get("COOKIES_FILE")
+        or ""
+    )
+    if not guard_output(output):
+        return 2
+    try:
+        with _scope_effect(binding):
+            cookie = (
+                cookie_header_for_url(
+                    Path(cookie_source),
+                    gql,
+                    max_source_bytes=args.max_cookie_source_bytes,
+                    max_cookies=args.max_cookies,
+                    max_header_bytes=args.max_cookie_header_bytes,
+                )
+                if cookie_source
+                else ""
+            )
+    except CookieSourceError as exc:
+        rec.update(
+            {
+                "ok": False,
+                "status": "input_limit",
+                "error": _bounded_error(exc),
+            }
+        )
+        jwrite(outdir / "summary.json", rec)
+        print(json.dumps(rec, indent=2))
+        return 1
+    if cookie:
+        headers["Cookie"] = cookie
+    body = {
+        "query": query,
+        "variables": {
+            "activityId": args.activity_id or None,
+            "attemptId": args.attempt_id or None,
+            "clusterId": args.cluster_id or None,
+            "questionId": args.question_id or None,
+        },
+    }
+    encoded_body = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    if len(encoded_body) > args.max_response_bytes:
+        rec.update(
+            {
+                "ok": False,
+                "status": "input_limit",
+                "error": "GraphQL request exceeds configured byte limit",
+            }
+        )
+        jwrite(outdir / "summary.json", rec)
+        print(json.dumps(rec, indent=2))
+        return 1
+    private_write_text(
+        outdir / "request.json",
+        json.dumps(
+            {
+                "url": gql,
+                "headers": {
+                    k: ("[present]" if k.lower() == "cookie" else v)
+                    for k, v in headers.items()
+                },
+                "body": body,
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+    )
+    if not guard_output(output):
+        return 2
+    try:
+        req = urllib.request.Request(
+            gql, data=encoded_body, headers=headers, method="POST"
+        )
+        with _scope_effect(binding):
+            with open_scoped(binding, req, timeout=120, network=network) as r:
+                raw = read_bounded(r, args.max_response_bytes)
+                status = r.status
+                response_headers = privacy_safe_response_headers(r.headers)
+        private_write_bytes(outdir / "response.raw", raw)
+        text = raw.decode("utf-8", "replace")
+        rec.update(
+            {
+                "ok": status < 400,
+                "status_code": status,
+                "response_path": f"{output.metadata_path}/response.raw",
+                "response_headers": response_headers,
+            }
+        )
+        try:
+            response_json = json.loads(text)
+        except (TypeError, ValueError):
+            private_write_text(outdir / "response.txt", text, errors="replace")
+        else:
+            jwrite(outdir / "response.json", response_json)
+        jwrite(outdir / "summary.json", rec)
+        print(json.dumps(rec, indent=2))
+        return 0 if status < 400 else 1
+    except urllib.error.HTTPError as exc:
+        raw = read_bounded(exc, args.max_response_bytes)
+        private_write_bytes(outdir / "response.raw", raw)
+        rec.update(
+            {
+                "ok": False,
+                "status": "request-error",
+                "status_code": exc.code,
+                "response_path": f"{output.metadata_path}/response.raw",
+                "response_headers": privacy_safe_response_headers(exc.headers),
+            }
+        )
+        jwrite(outdir / "summary.json", rec)
+        print(json.dumps(rec, indent=2))
+        return 1
+    except ScopeAuthorityError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError, urllib.error.URLError) as exc:
+        rec.update(
+            {"ok": False, "status": "request-error", "error": _bounded_error(exc)}
+        )
+        jwrite(outdir / "summary.json", rec)
+        print(json.dumps(rec, indent=2))
+        return 1
+
+
+def main() -> int:
+    try:
+        return _main()
+    except ScopeAuthorityError:
+        print("canonical scope authority changed before Immersive effect", file=sys.stderr)
+        return 4
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

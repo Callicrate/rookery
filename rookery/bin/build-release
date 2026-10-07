@@ -1,0 +1,29 @@
+#!/usr/bin/env -S python3 -I -S -B
+"""Build a strict deterministic release from this shipped Rookery wrapper."""
+
+import sys
+from pathlib import Path
+
+
+if sys.version_info < (3, 11):
+    print(
+        "Rookery requires Python 3.11 or newer; "
+        "found Python {}.{}.{}.".format(
+            sys.version_info.major,
+            sys.version_info.minor,
+            sys.version_info.micro,
+        ),
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "lib") not in sys.path:
+    sys.path.insert(0, str(ROOT / "lib"))
+
+from rookery.portable.release import main  # noqa: E402
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(Path(__file__)))

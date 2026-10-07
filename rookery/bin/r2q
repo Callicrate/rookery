@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [ $# -lt 1 ]; then echo "usage: r2q <binary> [--cmd 'aaa; afl']" >&2; exit 2; fi
+bin="$1"; shift
+if [ "${1:-}" = "--cmd" ]; then
+	if [ $# -lt 2 ]; then echo "r2q: --cmd requires a command" >&2; exit 2; fi
+	cmd="$2"
+else
+	cmd="${1:-aaa; afl; pdf @ main}"
+fi
+r2bin="$(command -v r2 || command -v radare2 || true)"
+if [ -z "$r2bin" ]; then echo "radare2 missing" >&2; exit 127; fi
+exec "$(dirname "$0")/runq" -t 120 -l r2q -- "$r2bin" -A -q -c "$cmd" "$bin"

@@ -1,0 +1,829 @@
+#!/usr/bin/env -S python3 -I -B
+"""Filter browser cookie exports to relevant platform domains and report freshness.
+
+Reads common browser/Playwright cookie JSON shapes or Netscape cookie text, writes a
+platform-ready Cookie header plus summary evidence. Does not redact or mutate input.
+"""
+
+from __future__ import annotations
+import argparse
+import datetime as dt
+import importlib.util
+import itertools
+import json
+import os
+import re
+import stat
+import sys
+import time
+import urllib.parse
+from pathlib import Path
+
+SOURCE_ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path.cwd()
+UTC = dt.timezone.utc
+sys.path.insert(0, str(SOURCE_ROOT / "lib"))
+
+from rookery.portable.adapters import run_bounded_argv  # noqa: E402
+from rookery.portable.environment import (  # noqa: E402
+    EnvClass,
+    EnvKey,
+    minimal_child_environment,
+    read_declared_environment,
+)
+from rookery.portable.optional_helper import require_bound_runtime_workspace  # noqa: E402
+from rookery.portable.scope import check_url  # noqa: E402
+
+
+def _load_immersive_module(name: str):
+    """Load one colocated helper without admitting its directory to sys.path."""
+
+    path = SOURCE_ROOT / "adapters" / "immersive" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"_rookery_immersive_{name}", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("unable to load required Immersive helper module")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_path_policy = _load_immersive_module("path_policy")
+ImmersiveOutputError = _path_policy.ImmersiveOutputError
+preflight_immersive_output = _path_policy.preflight_immersive_output
+prepare_immersive_output = _path_policy.prepare_immersive_output
+write_private_output_file = _path_policy.write_private_output_file
+
+DEFAULT_MAX_INPUT_BYTES = 1024 * 1024
+DEFAULT_MAX_COOKIES = 4096
+DEFAULT_MAX_NAME_BYTES = 1024
+DEFAULT_MAX_VALUE_BYTES = 16 * 1024
+DEFAULT_MAX_FIELD_BYTES = 4096
+DEFAULT_MAX_HEADER_BYTES = 1024 * 1024
+DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024
+MAX_INPUT_BYTES = 64 * 1024 * 1024
+MAX_COOKIES = 100_000
+MAX_NAME_BYTES = 8192
+MAX_VALUE_BYTES = 1024 * 1024
+MAX_FIELD_BYTES = 64 * 1024
+MAX_HEADER_BYTES = 16 * 1024 * 1024
+MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+MIN_OUTPUT_BYTES = 4096
+MAX_FILTER_ITEMS = 256
+
+
+class CookieInputError(RuntimeError):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def iso(ts=None):
+    if ts is None:
+        return dt.datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    return dt.datetime.fromtimestamp(float(ts), UTC).isoformat().replace("+00:00", "Z")
+
+
+def stamp():
+    return dt.datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def private_write_text(p: Path, text: str, *, errors: str = "strict"):
+    write_private_output_file(p, text.encode("utf-8", errors=errors))
+
+
+def guard_output(output) -> bool:
+    try:
+        output.guard()
+    except ImmersiveOutputError:
+        print("Immersive output directory changed or is no longer owned", file=sys.stderr)
+        return False
+    return True
+
+
+def safe(s):
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(s))[:120] or "item"
+
+
+_IMMERSIVE_ENV_KEYS = (
+    EnvKey("COOKIE_FILTER_DOMAINS", EnvClass.ROOKERY_CONFIG),
+    EnvKey("PLATFORM_COOKIE_DOMAINS", EnvClass.ROOKERY_CONFIG),
+    EnvKey("IMMERSIVE_COOKIE_DOMAINS", EnvClass.ROOKERY_CONFIG),
+    EnvKey("COOKIE_FILTER_URLS", EnvClass.ROOKERY_CONFIG),
+    EnvKey("IMMERSIVE_GRAPHQL_URL", EnvClass.ROOKERY_CONFIG),
+    EnvKey("IMMERSIVE_ACTIONCABLE_URL", EnvClass.ROOKERY_CONFIG),
+    EnvKey("CTFD_URL", EnvClass.ROOKERY_CONFIG),
+    EnvKey("PLATFORM_URL", EnvClass.ROOKERY_CONFIG),
+    EnvKey("GUACAMOLE_URL", EnvClass.ROOKERY_CONFIG),
+    EnvKey("COOKIES_LATEST", EnvClass.SESSION_SECRET_REF),
+    EnvKey("IMMERSIVE_COOKIES_FILE", EnvClass.SESSION_SECRET_REF),
+    EnvKey("PLATFORM_COOKIES_FILE", EnvClass.SESSION_SECRET_REF),
+    EnvKey("COOKIES_FILE", EnvClass.SESSION_SECRET_REF),
+    EnvKey("AUTH_EXPIRY_SAFETY_MINUTES", EnvClass.ROOKERY_CONFIG),
+)
+
+
+def read_env():
+    """Resolve only fixed cookie/session aliases from the supplied child mapping."""
+
+    return dict(read_declared_environment(ROOT, _IMMERSIVE_ENV_KEYS).values)
+
+
+def jwrite(p: Path, obj):
+    private_write_text(
+        p,
+        json.dumps(obj, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+    )
+
+
+def json_text(obj) -> str:
+    return json.dumps(obj, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+
+
+def validate_limit(name: str, value: int, minimum: int, maximum: int) -> int:
+    if value < minimum or value > maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+def bounded_text(value, maximum: int, reason: str) -> str:
+    text = str(value)
+    if len(text.encode("utf-8")) > maximum:
+        raise CookieInputError(reason)
+    return text
+
+
+def split_csv(s):
+    return [x.strip() for x in (s or "").split(",") if x.strip()]
+
+
+def host_from_url(u):
+    try:
+        return urllib.parse.urlparse(u).hostname or ""
+    except Exception:
+        return ""
+
+
+def exp_ts(v):
+    if v in (None, "", False):
+        return None
+    if isinstance(v, (int, float)):
+        if v <= 0:
+            return None
+        # Chrome/Playwright expirationDate/expires are epoch seconds.
+        return float(v) if v > 1000000000 else None
+    s = str(v).strip()
+    if not s or s.lower() in ("session", "none", "null"):
+        return None
+    try:
+        f = float(s)
+        return f if f > 1000000000 else None
+    except Exception:
+        pass
+    for fmt in [
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S.%fZ",
+        "%Y-%m-%d %H:%M:%S",
+        "%a, %d %b %Y %H:%M:%S %Z",
+        "%a, %d-%b-%Y %H:%M:%S %Z",
+    ]:
+        try:
+            return dt.datetime.strptime(s, fmt).replace(tzinfo=UTC).timestamp()
+        except Exception:
+            pass
+    return None
+
+
+def normalize_cookie(
+    c,
+    *,
+    max_name_bytes: int,
+    max_value_bytes: int,
+    max_field_bytes: int,
+):
+    if not isinstance(c, dict):
+        return None
+    name = c.get("name") or c.get("Name") or c.get("key") or c.get("Key")
+    value = (
+        c.get("value")
+        if "value" in c
+        else c.get("Value")
+        if "Value" in c
+        else c.get("val")
+    )
+    if name is None or value is None:
+        return None
+    name = bounded_text(name, max_name_bytes, "cookie_name_bytes")
+    value = bounded_text(value, max_value_bytes, "cookie_value_bytes")
+    domain = bounded_text(
+        c.get("domain") or c.get("Domain") or c.get("host") or c.get("Host") or "",
+        max_field_bytes,
+        "cookie_field_bytes",
+    )
+    path = bounded_text(
+        c.get("path") or c.get("Path") or "/",
+        max_field_bytes,
+        "cookie_field_bytes",
+    )
+    exp = c.get(
+        "expires",
+        c.get(
+            "expirationDate",
+            c.get(
+                "expiration", c.get("expiry", c.get("expires_at", c.get("expiresAt")))
+            ),
+        ),
+    )
+    if exp not in (None, "", False) and not isinstance(exp, (int, float)):
+        exp = bounded_text(exp, max_field_bytes, "cookie_field_bytes")
+    ts = exp_ts(exp)
+    return {
+        "name": name,
+        "value": value,
+        "domain": domain,
+        "path": path,
+        "expires_ts": ts,
+        "expires_utc": iso(ts) if ts else None,
+        "session": ts is None,
+        "secure": bool(c.get("secure") or c.get("Secure")),
+        "httpOnly": bool(c.get("httpOnly") or c.get("HttpOnly")),
+        "hostOnly": bool(
+            c.get("hostOnly", c.get("host_only", not domain.startswith(".")))
+        ),
+    }
+
+
+def extract_cookies(
+    obj,
+    *,
+    max_cookies: int,
+    max_name_bytes: int,
+    max_value_bytes: int,
+    max_field_bytes: int,
+):
+    out = []
+    stack = [obj]
+    visited = 0
+    max_nodes = min(1_000_000, max(1024, max_cookies * 16))
+    while stack:
+        x = stack.pop()
+        visited += 1
+        if visited > max_nodes:
+            raise CookieInputError("json_structure")
+        if isinstance(x, dict):
+            ck = normalize_cookie(
+                x,
+                max_name_bytes=max_name_bytes,
+                max_value_bytes=max_value_bytes,
+                max_field_bytes=max_field_bytes,
+            )
+            if ck:
+                out.append(ck)
+                if len(out) > max_cookies:
+                    raise CookieInputError("cookie_count")
+                continue
+            stack.extend(reversed(tuple(x.values())))
+        elif isinstance(x, list):
+            stack.extend(reversed(x))
+    return out
+
+
+def parse_netscape_line(
+    raw: bytes,
+    *,
+    max_name_bytes: int,
+    max_value_bytes: int,
+    max_field_bytes: int,
+):
+    stripped = raw.rstrip(b"\r\n")
+    if not stripped or stripped.startswith(b"#"):
+        return None
+    parts = stripped.split(b"\t", 6)
+    if len(parts) != 7:
+        return None
+    domain, domain_flag, path, secure, expires, name, value = [
+        part.decode("utf-8", errors="replace") for part in parts
+    ]
+    expires_ts = exp_ts(expires)
+    return normalize_cookie(
+        {
+            "name": name,
+            "value": value,
+            "domain": domain,
+            "path": path,
+            "expires": expires_ts,
+            "secure": secure.upper() == "TRUE",
+            "hostOnly": domain_flag.upper() != "TRUE",
+        },
+        max_name_bytes=max_name_bytes,
+        max_value_bytes=max_value_bytes,
+        max_field_bytes=max_field_bytes,
+    )
+
+
+def load_cookies(
+    path: Path,
+    *,
+    max_input_bytes: int,
+    max_cookies: int,
+    max_name_bytes: int,
+    max_value_bytes: int,
+    max_field_bytes: int,
+):
+    try:
+        source = os.lstat(path)
+    except FileNotFoundError:
+        raise CookieInputError("missing") from None
+    except OSError as error:
+        raise CookieInputError("input_type") from error
+    if (
+        stat.S_ISLNK(source.st_mode)
+        or not stat.S_ISREG(source.st_mode)
+        or source.st_nlink != 1
+    ):
+        raise CookieInputError("input_type")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise CookieInputError("input_type") from error
+    with os.fdopen(descriptor, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or (info.st_dev, info.st_ino) != (source.st_dev, source.st_ino)
+        ):
+            raise CookieInputError("input_type")
+        if info.st_size > max_input_bytes:
+            raise CookieInputError("input_bytes")
+        first = handle.readline(max_input_bytes + 1)
+        if len(first) > max_input_bytes:
+            raise CookieInputError("input_bytes")
+        prefix = first.lstrip(b"\xef\xbb\xbf \t\r\n")
+        if prefix.startswith((b"{", b"[")):
+            remainder = handle.read(max_input_bytes - len(first) + 1)
+            raw = first + remainder
+            if len(raw) > max_input_bytes:
+                raise CookieInputError("input_bytes")
+            try:
+                obj = json.loads(raw.decode("utf-8-sig", errors="replace"))
+            except (UnicodeError, json.JSONDecodeError) as error:
+                raise CookieInputError("invalid_format") from error
+            return (
+                extract_cookies(
+                    obj,
+                    max_cookies=max_cookies,
+                    max_name_bytes=max_name_bytes,
+                    max_value_bytes=max_value_bytes,
+                    max_field_bytes=max_field_bytes,
+                ),
+                "json",
+            )
+        cookies = []
+        total = 0
+        for raw in itertools.chain((first,), handle):
+            total += len(raw)
+            if total > max_input_bytes:
+                raise CookieInputError("input_bytes")
+            cookie = parse_netscape_line(
+                raw,
+                max_name_bytes=max_name_bytes,
+                max_value_bytes=max_value_bytes,
+                max_field_bytes=max_field_bytes,
+            )
+            if cookie is not None:
+                cookies.append(cookie)
+                if len(cookies) > max_cookies:
+                    raise CookieInputError("cookie_count")
+        return cookies, "netscape" if cookies else "unknown"
+
+
+def dom_match(cookie_domain, wanted):
+    cd = (cookie_domain or "").lstrip(".").lower()
+    w = (wanted or "").lstrip(".").lower()
+    if not w:
+        return True
+    return cd == w or cd.endswith("." + w) or w.endswith("." + cd)
+
+
+def target_urls(env, args):
+    urls = split_csv(args.urls)
+    urls += split_csv(env.get("COOKIE_FILTER_URLS") or "")
+    for key in (
+        "IMMERSIVE_GRAPHQL_URL",
+        "IMMERSIVE_ACTIONCABLE_URL",
+        "CTFD_URL",
+        "PLATFORM_URL",
+        "GUACAMOLE_URL",
+    ):
+        if env.get(key):
+            urls.append(env[key])
+    return tuple(dict.fromkeys(urls))
+
+
+def relevant_domains(env, args, urls=()):
+    doms = []
+    doms += split_csv(args.domains)
+    doms += split_csv(
+        env.get("COOKIE_FILTER_DOMAINS")
+        or env.get("PLATFORM_COOKIE_DOMAINS")
+        or env.get("IMMERSIVE_COOKIE_DOMAINS")
+        or ""
+    )
+    urls = urls or target_urls(env, args)
+    for u in urls:
+        h = host_from_url(u)
+        if h:
+            doms.append(h)
+    # de-dupe preserving order
+    seen = set()
+    out = []
+    for d in doms:
+        d = d.strip().lstrip(".")
+        if d and d not in seen:
+            seen.add(d)
+            out.append(d)
+    return out
+
+
+def _validated_target_url(value):
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        port = parsed.port
+    except ValueError as error:
+        raise CookieInputError("target_url") from error
+    if (
+        parsed.scheme.casefold() not in {"http", "https", "ws", "wss"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None and not 1 <= port <= 65535
+    ):
+        raise CookieInputError("target_url")
+    return parsed
+
+
+def _normalized_host(value):
+    candidate = value.rstrip(".").casefold()
+    if not candidate:
+        raise CookieInputError("target_url")
+    try:
+        return candidate.encode("idna").decode("ascii")
+    except UnicodeError as error:
+        raise CookieInputError("target_url") from error
+
+
+def _path_matches(cookie_path, target_path):
+    return cookie_path == target_path or (
+        target_path.startswith(cookie_path)
+        and (
+            cookie_path.endswith("/")
+            or (
+                len(target_path) > len(cookie_path)
+                and target_path[len(cookie_path)] == "/"
+            )
+        )
+    )
+
+
+def cookie_matches_target(cookie, target):
+    """Preserve browser domain, Secure, and path restrictions for each URL."""
+
+    target_host = _normalized_host(target.hostname or "")
+    raw_domain = str(cookie.get("domain", ""))
+    cookie_host = _normalized_host(raw_domain.lstrip("."))
+    host_only = bool(cookie.get("hostOnly", not raw_domain.startswith(".")))
+    domain_matches = (
+        target_host == cookie_host
+        if host_only
+        else target_host == cookie_host or target_host.endswith("." + cookie_host)
+    )
+    return (
+        domain_matches
+        and _path_matches(str(cookie.get("path", "/") or "/"), target.path or "/")
+        and not (
+            bool(cookie.get("secure"))
+            and target.scheme.casefold() not in {"https", "wss"}
+        )
+    )
+
+
+def scope_guard_urls(urls):
+    """Check every cookie destination before the cookie file is opened."""
+
+    targets = tuple(_validated_target_url(value) for value in urls)
+    if not targets:
+        return targets
+    result = run_bounded_argv(
+        [str(SOURCE_ROOT / "bin/scope-check"), "show"],
+        cwd=ROOT,
+        timeout=30,
+        max_output_bytes=1024 * 1024,
+        env=minimal_child_environment(ROOT, policy_name="immersive-scope-check"),
+    )
+    if result.returncode != 0:
+        raise CookieInputError("scope_denied")
+    try:
+        scope = json.loads(result.stdout.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError as error:
+        raise CookieInputError("scope_denied") from error
+    if not isinstance(scope, dict):
+        raise CookieInputError("scope_denied")
+    for target in targets:
+        decision = check_url(scope, target.geturl(), platform=True)
+        if not decision.allowed:
+            raise CookieInputError("scope_denied")
+    return targets
+
+
+def default_cookie_file(env, args):
+    if args.file:
+        return args.file
+    for k in [
+        "COOKIES_LATEST",
+        "IMMERSIVE_COOKIES_FILE",
+        "PLATFORM_COOKIES_FILE",
+        "COOKIES_FILE",
+    ]:
+        if env.get(k):
+            return env[k]
+    return "platform/auth/cookies-latest.json"
+
+
+def main():
+    os.umask(0o077)
+    ap = argparse.ArgumentParser(
+        description="Filter cookies-latest.json to platform-relevant cookies and emit Cookie header/freshness summary."
+    )
+    ap.add_argument("--file", default="")
+    ap.add_argument("--domains", default="", help="comma-separated relevant domains")
+    ap.add_argument(
+        "--urls",
+        default="",
+        help="comma-separated URLs whose hosts imply relevant domains",
+    )
+    ap.add_argument("--outdir", default="")
+    ap.add_argument("--header-only", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--strict", action="store_true")
+    ap.add_argument("--min-valid-minutes", type=float, default=None)
+    ap.add_argument("--max-input-bytes", type=int, default=DEFAULT_MAX_INPUT_BYTES)
+    ap.add_argument("--max-cookies", type=int, default=DEFAULT_MAX_COOKIES)
+    ap.add_argument("--max-name-bytes", type=int, default=DEFAULT_MAX_NAME_BYTES)
+    ap.add_argument("--max-value-bytes", type=int, default=DEFAULT_MAX_VALUE_BYTES)
+    ap.add_argument("--max-field-bytes", type=int, default=DEFAULT_MAX_FIELD_BYTES)
+    ap.add_argument("--max-header-bytes", type=int, default=DEFAULT_MAX_HEADER_BYTES)
+    ap.add_argument("--max-output-bytes", type=int, default=DEFAULT_MAX_OUTPUT_BYTES)
+    args = ap.parse_args()
+    require_bound_runtime_workspace(ROOT)
+    try:
+        validate_limit("max-input-bytes", args.max_input_bytes, 1, MAX_INPUT_BYTES)
+        validate_limit("max-cookies", args.max_cookies, 1, MAX_COOKIES)
+        validate_limit("max-name-bytes", args.max_name_bytes, 1, MAX_NAME_BYTES)
+        validate_limit("max-value-bytes", args.max_value_bytes, 1, MAX_VALUE_BYTES)
+        validate_limit("max-field-bytes", args.max_field_bytes, 1, MAX_FIELD_BYTES)
+        validate_limit("max-header-bytes", args.max_header_bytes, 1, MAX_HEADER_BYTES)
+        validate_limit(
+            "max-output-bytes",
+            args.max_output_bytes,
+            MIN_OUTPUT_BYTES,
+            MAX_OUTPUT_BYTES,
+        )
+    except ValueError as error:
+        ap.error(str(error))
+    try:
+        output_plan = preflight_immersive_output(
+            ROOT,
+            family_parts=("platform", "cookies"),
+            raw_outdir=args.outdir,
+            default_label="cookie-filter",
+        )
+    except ImmersiveOutputError:
+        print("Immersive output directory is invalid or not owned", file=sys.stderr)
+        return 2
+    env = read_env()
+    f = Path(default_cookie_file(env, args))
+    min_valid = (
+        args.min_valid_minutes
+        if args.min_valid_minutes is not None
+        else float(env.get("AUTH_EXPIRY_SAFETY_MINUTES", "10") or 10)
+    )
+    now = time.time()
+    urls = target_urls(env, args)
+    doms = relevant_domains(env, args, urls)
+    try:
+        targets = scope_guard_urls(urls)
+    except CookieInputError:
+        print("cookie input rejected: scope_denied", file=sys.stderr)
+        return 4
+    try:
+        output = prepare_immersive_output(
+            ROOT,
+            family_parts=("platform", "cookies"),
+            raw_outdir="",
+            default_label="cookie-filter",
+            plan=output_plan,
+        )
+    except ImmersiveOutputError:
+        print("Immersive output directory is invalid or not owned", file=sys.stderr)
+        return 2
+    outdir = output.path
+    rec = {
+        "created_at": iso(),
+        "cookie_source_configured": bool(args.file or any(
+            env.get(key)
+            for key in (
+                "COOKIES_LATEST",
+                "IMMERSIVE_COOKIES_FILE",
+                "PLATFORM_COOKIES_FILE",
+                "COOKIES_FILE",
+            )
+        )),
+        "domains": doms,
+        "min_valid_minutes": min_valid,
+        "outdir": output.metadata_path,
+        "status": "missing",
+        "selected_count": 0,
+        "limits": {
+            "input_bytes": args.max_input_bytes,
+            "cookies": args.max_cookies,
+            "name_bytes": args.max_name_bytes,
+            "value_bytes": args.max_value_bytes,
+            "field_bytes": args.max_field_bytes,
+            "header_bytes": args.max_header_bytes,
+            "output_bytes": args.max_output_bytes,
+        },
+    }
+    try:
+        if not guard_output(output):
+            return 2
+        if len(doms) > MAX_FILTER_ITEMS or any(
+            len(domain.encode("utf-8")) > args.max_field_bytes for domain in doms
+        ):
+            raise CookieInputError("filter_fields")
+        try:
+            st = os.lstat(f)
+        except FileNotFoundError:
+            st = None
+        except OSError as error:
+            raise CookieInputError("input_type") from error
+        if st is not None:
+            if (
+                stat.S_ISLNK(st.st_mode)
+                or not stat.S_ISREG(st.st_mode)
+                or st.st_nlink != 1
+            ):
+                raise CookieInputError("input_type")
+            if not guard_output(output):
+                return 2
+            rec.update(
+                {
+                    "mtime_utc": iso(st.st_mtime),
+                    "age_minutes": round((now - st.st_mtime) / 60, 2),
+                    "size": st.st_size,
+                }
+            )
+            cookies, fmt = load_cookies(
+                f,
+                max_input_bytes=args.max_input_bytes,
+                max_cookies=args.max_cookies,
+                max_name_bytes=args.max_name_bytes,
+                max_value_bytes=args.max_value_bytes,
+                max_field_bytes=args.max_field_bytes,
+            )
+            rec["format"] = fmt
+            rec["total_count"] = len(cookies)
+            selected = [
+                cookie
+                for cookie in cookies
+                if (
+                    not doms
+                    or any(
+                        dom_match(cookie.get("domain", ""), domain)
+                        for domain in doms
+                    )
+                )
+                and (
+                    not targets
+                    or any(cookie_matches_target(cookie, target) for target in targets)
+                )
+            ]
+            pairs = []
+            header_bytes = 0
+            expired = []
+            near = []
+            session = []
+            valid = []
+            for cookie in selected:
+                expires_ts = cookie.get("expires_ts")
+                if expires_ts is None:
+                    session.append(cookie)
+                elif expires_ts <= now:
+                    expired.append(cookie)
+                elif expires_ts - now < min_valid * 60:
+                    near.append(cookie)
+                else:
+                    valid.append(cookie)
+                if expires_ts is None or expires_ts > now:
+                    pair = f"{cookie['name']}={cookie['value']}"
+                    pair_bytes = len(pair.encode("utf-8"))
+                    header_bytes += pair_bytes + (2 if pairs else 0)
+                    if header_bytes > args.max_header_bytes:
+                        raise CookieInputError("header_bytes")
+                    pairs.append(pair)
+            header = "; ".join(pairs) + "\n"
+            if len(header.encode("utf-8")) > args.max_header_bytes:
+                raise CookieInputError("header_bytes")
+            selected_text = json_text(selected)
+            if len(header.encode("utf-8")) > args.max_output_bytes or len(
+                selected_text.encode("utf-8")
+            ) > args.max_output_bytes:
+                raise CookieInputError("output_bytes")
+            rec.update(
+                {
+                    "status": "ok",
+                    "selected_count": len(selected),
+                    "usable_count": len(pairs),
+                    "expired_count": len(expired),
+                    "near_expiry_count": len(near),
+                    "session_count": len(session),
+                    "valid_persistent_count": len(valid),
+                    "header_path": f"{output.metadata_path}/cookie-header.txt",
+                    "selected_path": f"{output.metadata_path}/selected-cookies.json",
+                }
+            )
+            expiries = [
+                cookie.get("expires_ts")
+                for cookie in selected
+                if cookie.get("expires_ts")
+            ]
+            if expiries:
+                rec["nearest_expiry_utc"] = iso(min(expiries))
+                rec["minutes_until_nearest_expiry"] = round(
+                    (min(expiries) - now) / 60, 2
+                )
+            if len(selected) == 0:
+                rec["status"] = "no_relevant_cookies"
+            elif len(pairs) == 0:
+                rec["status"] = "expired"
+            elif near:
+                rec["status"] = "near_expiry"
+            elif expired:
+                rec["status"] = "ok_with_some_expired"
+            summary_text = json_text(rec)
+            if len(summary_text.encode("utf-8")) > args.max_output_bytes:
+                raise CookieInputError("output_bytes")
+            private_write_text(outdir / "cookie-header.txt", header)
+            private_write_text(outdir / "selected-cookies.json", selected_text)
+            private_write_text(outdir / "summary.json", summary_text)
+        else:
+            summary_text = json_text(rec)
+            if len(summary_text.encode("utf-8")) > args.max_output_bytes:
+                raise CookieInputError("output_bytes")
+            private_write_text(outdir / "summary.json", summary_text)
+    except ImmersiveOutputError:
+        print("Immersive output directory changed or is no longer owned", file=sys.stderr)
+        return 2
+    except CookieInputError as error:
+        rec = {
+            "created_at": iso(),
+            "outdir": output.metadata_path,
+            "status": "scope_denied"
+            if error.reason == "scope_denied"
+            else "input_limit",
+            "reason": error.reason,
+        }
+        failure_text = json_text(rec)
+        if len(failure_text.encode("utf-8")) <= args.max_output_bytes:
+            private_write_text(outdir / "summary.json", failure_text)
+        print("cookie input rejected: input_limit", file=sys.stderr)
+        return 4
+    if args.header_only:
+        hp = Path(rec.get("header_path", ""))
+        if hp.exists():
+            print(hp.read_text(errors="replace"), end="")
+    elif args.json:
+        print(json.dumps(rec, indent=2, ensure_ascii=False))
+    else:
+        print(
+            f"cookie_filter={rec.get('status')} selected={rec.get('selected_count', 0)} usable={rec.get('usable_count', 0)} summary={output.metadata_path}/summary.json"
+        )
+        if rec.get("header_path"):
+            print(f"header={rec['header_path']}")
+    bad = rec.get("status") in (
+        "missing",
+        "expired",
+        "near_expiry",
+        "no_relevant_cookies",
+    )
+    return 3 if args.strict and bad else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

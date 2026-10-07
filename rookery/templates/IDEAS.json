@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Rookery exploration ideation artifact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "campaign_id",
+    "lens",
+    "ideas"
+  ],
+  "properties": {
+    "campaign_id": {
+      "type": "string",
+      "pattern": "^campaign_[a-z][a-z0-9_-]{0,79}$"
+    },
+    "lens": {
+      "enum": [
+        "fresh",
+        "evidence",
+        "artifact",
+        "contrarian"
+      ]
+    },
+    "ideas": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "idea_id",
+          "route_key",
+          "next_step",
+          "mechanism",
+          "prerequisite_evidence",
+          "discriminating_test",
+          "estimated_cost_seconds",
+          "expected_value",
+          "evidence_value",
+          "why_novel"
+        ],
+        "properties": {
+          "idea_id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,79}$"
+          },
+          "route_key": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._:-]{0,127}$"
+          },
+          "next_step": {
+            "type": "string"
+          },
+          "mechanism": {
+            "type": "string"
+          },
+          "prerequisite_evidence": {
+            "type": "string"
+          },
+          "discriminating_test": {
+            "type": "string"
+          },
+          "estimated_cost_seconds": {
+            "type": "integer",
+            "minimum": 30,
+            "maximum": 14400
+          },
+          "expected_value": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "evidence_value": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "why_novel": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

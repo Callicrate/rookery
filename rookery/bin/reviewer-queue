@@ -1,0 +1,159 @@
+#!/usr/bin/env -S python3 -I -B
+"""Separated reviewer queue view: proposed, accepted, rejected, auth-blocked."""
+
+from __future__ import annotations
+import argparse
+import json
+from pathlib import Path
+
+ROOT = Path.cwd()
+
+
+def read_jsonl(p):
+    p = Path(p)
+    if not p.exists():
+        return []
+    out = []
+    for line in p.read_text(errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            out.append({"raw": line})
+    return out
+
+
+def proposals():
+    rows = []
+    for p in sorted((ROOT / "submissions/proposals").glob("*.json")):
+        if p.name == "proposals.jsonl":
+            continue
+        try:
+            rows.append(json.loads(p.read_text(errors="replace")))
+        except Exception:
+            pass
+    rows += read_jsonl(ROOT / "submissions/proposals.jsonl")
+    seen = {}
+    for r in rows:
+        pid = r.get("proposal_id")
+        if pid:
+            seen[pid] = r
+    return list(seen.values())
+
+
+def review_last():
+    last = {}
+    for r in read_jsonl(ROOT / "submissions/review/review_log.jsonl") + read_jsonl(
+        ROOT / "submissions/reconciled/reconcile_log.jsonl"
+    ):
+        pid = r.get("proposal_id")
+        if pid:
+            last[pid] = r
+    return last
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Show reviewer queue separated by local/proposed, accepted, rejected, and auth-blocked states."
+    )
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--limit", type=int, default=50)
+    args = ap.parse_args()
+    props = proposals()
+    last = review_last()
+    buckets = {
+        "local_proposed": [],
+        "platform_accepted": [],
+        "platform_rejected": [],
+        "blocked_by_auth": [],
+        "unknown_or_other": [],
+    }
+
+    def bucket_item(item, verdict, has_review=True):
+        v = str(verdict or "").lower()
+        if "blocked-by-auth" in v or ("auth" in v and "block" in v):
+            buckets["blocked_by_auth"].append(item)
+        elif "accepted" in v or v == "correct":
+            buckets["platform_accepted"].append(item)
+        elif "rejected" in v or "incorrect" in v or "manual_reject" in v:
+            buckets["platform_rejected"].append(item)
+        elif (not has_review) or v in (
+            "pending",
+            "candidate",
+            "approved_ready_hoarded",
+            "hold_needs_proof",
+            "hold_anomaly",
+            "ready",
+            "submit-safe",
+        ):
+            buckets["local_proposed"].append(item)
+        else:
+            buckets["unknown_or_other"].append(item)
+
+    seen_paths = set()
+    for p in props:
+        r = last.get(p.get("proposal_id"), {})
+        verdict = (
+            r.get("verdict")
+            or r.get("review_status")
+            or p.get("review_status")
+            or "pending"
+        )
+        item = {
+            "proposal_id": p.get("proposal_id"),
+            "kind": p.get("kind"),
+            "challenge": p.get("challenge"),
+            "candidate": p.get("candidate"),
+            "confidence": p.get("confidence"),
+            "created_at": p.get("created_at"),
+            "review_status": r.get("review_status") or p.get("review_status"),
+            "verdict": r.get("verdict"),
+            "response_path": r.get("raw_response_path") or r.get("path"),
+            "source": p.get("source"),
+        }
+        if item.get("response_path"):
+            seen_paths.add(item["response_path"])
+        bucket_item(item, verdict, bool(r))
+    # Include direct/special platform responses that have no proposal_id, so reviewer state cannot drift.
+    for r in read_jsonl(ROOT / "submissions/reconciled/reconcile_log.jsonl"):
+        if r.get("proposal_id"):
+            continue
+        path = r.get("path") or r.get("response_path")
+        if path in seen_paths:
+            continue
+        item = {
+            "proposal_id": "",
+            "kind": "direct-platform-response",
+            "challenge": r.get("challenge"),
+            "candidate": r.get("candidate"),
+            "confidence": "",
+            "created_at": r.get("created_at"),
+            "review_status": "reconciled",
+            "verdict": r.get("verdict"),
+            "response_path": path,
+            "source": "submission-reconcile",
+        }
+        bucket_item(item, r.get("verdict"), True)
+    summary = {"counts": {k: len(v) for k, v in buckets.items()}, "buckets": buckets}
+    if args.json:
+        print(json.dumps(summary, indent=2, ensure_ascii=False))
+    else:
+        print(" ".join(f"{k}={v}" for k, v in summary["counts"].items()))
+        for name in [
+            "local_proposed",
+            "blocked_by_auth",
+            "platform_accepted",
+            "platform_rejected",
+            "unknown_or_other",
+        ]:
+            print(f"\n## {name}")
+            for x in buckets[name][-args.limit :]:
+                print(
+                    f"- {x.get('proposal_id')} ch={x.get('challenge')} verdict={x.get('verdict') or x.get('review_status')} cand={x.get('candidate')}"
+                )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

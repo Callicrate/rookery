@@ -1,0 +1,923 @@
+[
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded agent board capability when the selected event surface requires core.",
+      "distinct_contract": "tool:agent-board",
+      "evidence": "Rookery implementation at bin/agent-board; selected only by capability/profile registry fixtures."
+    },
+    "id": "agent-board",
+    "path": "bin/agent-board",
+    "purpose": "agent board",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded agent harvest capability when the selected event surface requires core.",
+      "distinct_contract": "tool:agent-harvest",
+      "evidence": "Rookery implementation at bin/agent-harvest; selected only by capability/profile registry fixtures."
+    },
+    "id": "agent-harvest",
+    "path": "bin/agent-harvest",
+    "purpose": "agent harvest",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded answer ledger capability when the selected event surface requires advanced-scoring-review.",
+      "distinct_contract": "tool:answer-ledger",
+      "evidence": "Rookery implementation at bin/answer-ledger; selected only by capability/profile registry fixtures."
+    },
+    "id": "answer-ledger",
+    "path": "bin/answer-ledger",
+    "purpose": "answer ledger",
+    "requires_all": [],
+    "requires_any": [
+      "advanced-scoring-review"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded artifact lint capability when the selected event surface requires core.",
+      "distinct_contract": "tool:artifact-lint",
+      "evidence": "Rookery implementation at bin/artifact-lint; selected only by capability/profile registry fixtures."
+    },
+    "id": "artifact-lint",
+    "path": "bin/artifact-lint",
+    "purpose": "artifact lint",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded attempt registry capability when the selected event surface requires platform-sessions.",
+      "distinct_contract": "tool:attempt-registry",
+      "evidence": "Rookery implementation at bin/attempt-registry; selected only by capability/profile registry fixtures."
+    },
+    "id": "attempt-registry",
+    "path": "bin/attempt-registry",
+    "purpose": "attempt registry",
+    "requires_all": [],
+    "requires_any": [
+      "platform-sessions"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded attempt scope check capability when the selected event surface requires platform-sessions.",
+      "distinct_contract": "tool:attempt-scope-check",
+      "evidence": "Rookery implementation at bin/attempt-scope-check; selected only by capability/profile registry fixtures."
+    },
+    "id": "attempt-scope-check",
+    "path": "bin/attempt-scope-check",
+    "purpose": "attempt scope check",
+    "requires_all": [],
+    "requires_any": [
+      "platform-sessions"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded attempt summary capability when the selected event surface requires platform-sessions.",
+      "distinct_contract": "tool:attempt-summary",
+      "evidence": "Rookery implementation at bin/attempt-summary; selected only by capability/profile registry fixtures."
+    },
+    "id": "attempt-summary",
+    "path": "bin/attempt-summary",
+    "purpose": "attempt summary",
+    "requires_all": [],
+    "requires_any": [
+      "platform-sessions"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded b64hunt.py capability when the selected event surface requires misc.",
+      "distinct_contract": "tool:b64hunt.py",
+      "evidence": "Rookery implementation at bin/b64hunt.py; selected only by capability/profile registry fixtures."
+    },
+    "id": "b64hunt.py",
+    "path": "bin/b64hunt.py",
+    "purpose": "b64hunt.py",
+    "requires_all": [],
+    "requires_any": [
+      "misc"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded challenge ingest capability when the selected event surface requires platform_inventory.",
+      "distinct_contract": "tool:challenge-ingest",
+      "evidence": "Rookery implementation at bin/challenge-ingest; selected only by capability/profile registry fixtures."
+    },
+    "id": "challenge-ingest",
+    "path": "bin/challenge-ingest",
+    "purpose": "challenge ingest",
+    "requires_all": [],
+    "requires_any": [
+      "platform_inventory"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded challenge state capability when the selected event surface requires core.",
+      "distinct_contract": "tool:challenge-state",
+      "evidence": "Rookery implementation at bin/challenge-state; selected only by capability/profile registry fixtures."
+    },
+    "id": "challenge-state",
+    "path": "bin/challenge-state",
+    "purpose": "challenge state",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded challenge unlock watch capability when the selected event surface requires platform_inventory.",
+      "distinct_contract": "tool:challenge-unlock-watch",
+      "evidence": "Rookery implementation at bin/challenge-unlock-watch; selected only by capability/profile registry fixtures."
+    },
+    "id": "challenge-unlock-watch",
+    "path": "bin/challenge-unlock-watch",
+    "purpose": "challenge unlock watch",
+    "requires_all": [],
+    "requires_any": [
+      "platform_inventory"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded cookie filter capability when the selected event surface requires platform-sessions.",
+      "distinct_contract": "tool:cookie-filter",
+      "evidence": "Rookery implementation at bin/cookie-filter; selected only by capability/profile registry fixtures."
+    },
+    "id": "cookie-filter",
+    "path": "bin/cookie-filter",
+    "purpose": "cookie filter",
+    "requires_all": [],
+    "requires_any": [
+      "platform-sessions"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded crack helper.sh capability when the selected event surface requires crypto.",
+      "distinct_contract": "tool:crack-helper.sh",
+      "evidence": "Rookery implementation at bin/crack-helper.sh; selected only by capability/profile registry fixtures."
+    },
+    "id": "crack-helper.sh",
+    "path": "bin/crack-helper.sh",
+    "purpose": "crack helper.sh",
+    "requires_all": [],
+    "requires_any": [
+      "crypto"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded credential health capability when the selected event surface requires platform-sessions.",
+      "distinct_contract": "tool:credential-health",
+      "evidence": "Rookery implementation at bin/credential-health; selected only by capability/profile registry fixtures."
+    },
+    "id": "credential-health",
+    "path": "bin/credential-health",
+    "purpose": "credential health",
+    "requires_all": [],
+    "requires_any": [
+      "platform-sessions"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded crypto triage capability when the selected event surface requires crypto.",
+      "distinct_contract": "tool:crypto-triage",
+      "evidence": "Rookery implementation at bin/crypto-triage; selected only by capability/profile registry fixtures."
+    },
+    "id": "crypto-triage",
+    "path": "bin/crypto-triage",
+    "purpose": "crypto triage",
+    "requires_all": [],
+    "requires_any": [
+      "crypto"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded decoder lab capability when the selected event surface requires misc.",
+      "distinct_contract": "tool:decoder-lab",
+      "evidence": "Rookery implementation at bin/decoder-lab; selected only by capability/profile registry fixtures."
+    },
+    "id": "decoder-lab",
+    "path": "bin/decoder-lab",
+    "purpose": "decoder lab",
+    "requires_all": [],
+    "requires_any": [
+      "misc"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded digest capability when the selected event surface requires core.",
+      "distinct_contract": "tool:digest",
+      "evidence": "Rookery implementation at bin/digest; selected only by capability/profile registry fixtures."
+    },
+    "id": "digest",
+    "path": "bin/digest",
+    "purpose": "digest",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded evidence add capability when the selected event surface requires core.",
+      "distinct_contract": "tool:evidence-add",
+      "evidence": "Rookery implementation at bin/evidence-add; selected only by capability/profile registry fixtures."
+    },
+    "id": "evidence-add",
+    "path": "bin/evidence-add",
+    "purpose": "evidence add",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded evidence manifest capability when the selected event surface requires core.",
+      "distinct_contract": "tool:evidence-manifest",
+      "evidence": "Rookery implementation at bin/evidence-manifest; selected only by capability/profile registry fixtures."
+    },
+    "id": "evidence-manifest",
+    "path": "bin/evidence-manifest",
+    "purpose": "evidence manifest",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded file triage capability when the selected event surface requires forensics.",
+      "distinct_contract": "tool:file-triage",
+      "evidence": "Rookery implementation at bin/file-triage; selected only by capability/profile registry fixtures."
+    },
+    "id": "file-triage",
+    "path": "bin/file-triage",
+    "purpose": "file triage",
+    "requires_all": [],
+    "requires_any": [
+      "forensics"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded flag propose capability when the selected event surface requires advanced-scoring-review.",
+      "distinct_contract": "tool:flag-propose",
+      "evidence": "Rookery implementation at bin/flag-propose; selected only by capability/profile registry fixtures."
+    },
+    "id": "flag-propose",
+    "path": "bin/flag-propose",
+    "purpose": "flag propose",
+    "requires_all": [],
+    "requires_any": [
+      "advanced-scoring-review"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded flag review capability when the selected event surface requires advanced-scoring-review.",
+      "distinct_contract": "tool:flag-review",
+      "evidence": "Rookery implementation at bin/flag-review; selected only by capability/profile registry fixtures."
+    },
+    "id": "flag-review",
+    "path": "bin/flag-review",
+    "purpose": "flag review",
+    "requires_all": [],
+    "requires_any": [
+      "advanced-scoring-review"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded forensics triage capability when the selected event surface requires forensics.",
+      "distinct_contract": "tool:forensics-triage",
+      "evidence": "Rookery implementation at bin/forensics-triage; selected only by capability/profile registry fixtures."
+    },
+    "id": "forensics-triage",
+    "path": "bin/forensics-triage",
+    "purpose": "forensics triage",
+    "requires_all": [
+      "tool:exiftool",
+      "tool:file"
+    ],
+    "requires_any": [
+      "forensics"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded frontier capability when the selected event surface requires core.",
+      "distinct_contract": "tool:frontier",
+      "evidence": "Rookery implementation at bin/frontier; selected only by capability/profile registry fixtures."
+    },
+    "id": "frontier",
+    "path": "bin/frontier",
+    "purpose": "frontier",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded gdbq capability when the selected event surface requires pwn.",
+      "distinct_contract": "tool:gdbq",
+      "evidence": "Rookery implementation at bin/gdbq; selected only by capability/profile registry fixtures."
+    },
+    "id": "gdbq",
+    "path": "bin/gdbq",
+    "purpose": "gdbq",
+    "requires_all": [
+      "tool:gdb"
+    ],
+    "requires_any": [
+      "pwn"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded goal state capability when the selected event surface requires core.",
+      "distinct_contract": "tool:goal-state",
+      "evidence": "Rookery implementation at bin/goal-state; selected only by capability/profile registry fixtures."
+    },
+    "id": "goal-state",
+    "path": "bin/goal-state",
+    "purpose": "goal state",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded jwt dump.py capability when the selected event surface requires web.",
+      "distinct_contract": "tool:jwt-dump.py",
+      "evidence": "Rookery implementation at bin/jwt-dump.py; selected only by capability/profile registry fixtures."
+    },
+    "id": "jwt-dump.py",
+    "path": "bin/jwt-dump.py",
+    "purpose": "jwt dump.py",
+    "requires_all": [],
+    "requires_any": [
+      "web"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded ncq capability when the selected event surface requires network.",
+      "distinct_contract": "tool:ncq",
+      "evidence": "Rookery implementation at bin/ncq; selected only by capability/profile registry fixtures."
+    },
+    "id": "ncq",
+    "path": "bin/ncq",
+    "purpose": "DNS-pinned numeric netcat probe",
+    "requires_all": [
+      "tool:netcat"
+    ],
+    "requires_any": [
+      "network"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded near miss retry capability when the selected event surface requires advanced-scoring-review.",
+      "distinct_contract": "tool:near-miss-retry",
+      "evidence": "Rookery implementation at bin/near-miss-retry; selected only by capability/profile registry fixtures."
+    },
+    "id": "near-miss-retry",
+    "path": "bin/near-miss-retry",
+    "purpose": "near miss retry",
+    "requires_all": [],
+    "requires_any": [
+      "advanced-scoring-review"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded platform heavy pause capability when the selected event surface requires platform_inventory.",
+      "distinct_contract": "tool:platform-heavy-pause",
+      "evidence": "Rookery implementation at bin/platform-heavy-pause; selected only by capability/profile registry fixtures."
+    },
+    "id": "platform-heavy-pause",
+    "path": "bin/platform-heavy-pause",
+    "purpose": "platform heavy pause",
+    "requires_all": [],
+    "requires_any": [
+      "platform_inventory"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded platform inventory capability when the selected event surface requires platform_inventory.",
+      "distinct_contract": "tool:platform-inventory",
+      "evidence": "Rookery implementation at bin/platform-inventory; selected only by capability/profile registry fixtures."
+    },
+    "id": "platform-inventory",
+    "path": "bin/platform-inventory",
+    "purpose": "platform inventory",
+    "requires_all": [],
+    "requires_any": [
+      "platform_inventory"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded platform session health capability when the selected event surface requires platform-sessions.",
+      "distinct_contract": "tool:platform-session-health",
+      "evidence": "Rookery implementation at bin/platform-session-health; selected only by capability/profile registry fixtures."
+    },
+    "id": "platform-session-health",
+    "path": "bin/platform-session-health",
+    "purpose": "platform session health",
+    "requires_all": [],
+    "requires_any": [
+      "platform-sessions"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded platform sync capability when the selected event surface requires platform_inventory.",
+      "distinct_contract": "tool:platform-sync",
+      "evidence": "Rookery implementation at bin/platform-sync; selected only by capability/profile registry fixtures."
+    },
+    "id": "platform-sync",
+    "path": "bin/platform-sync",
+    "purpose": "platform sync",
+    "requires_all": [],
+    "requires_any": [
+      "platform_inventory"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded proposal attach verifier capability when the selected event surface requires scoring-review.",
+      "distinct_contract": "tool:proposal-attach-verifier",
+      "evidence": "Rookery implementation at bin/proposal-attach-verifier; selected only by capability/profile registry fixtures."
+    },
+    "id": "proposal-attach-verifier",
+    "path": "bin/proposal-attach-verifier",
+    "purpose": "proposal attach verifier",
+    "requires_all": [],
+    "requires_any": [
+      "scoring-review"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded pwn triage capability when the selected event surface requires pwn.",
+      "distinct_contract": "tool:pwn-triage",
+      "evidence": "Rookery implementation at bin/pwn-triage; selected only by capability/profile registry fixtures."
+    },
+    "id": "pwn-triage",
+    "path": "bin/pwn-triage",
+    "purpose": "pwn triage",
+    "requires_all": [],
+    "requires_any": [
+      "pwn"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded queue watch capability when the selected event surface requires advanced-scoring-review.",
+      "distinct_contract": "tool:queue-watch",
+      "evidence": "Rookery implementation at bin/queue-watch; selected only by capability/profile registry fixtures."
+    },
+    "id": "queue-watch",
+    "path": "bin/queue-watch",
+    "purpose": "queue watch",
+    "requires_all": [],
+    "requires_any": [
+      "advanced-scoring-review"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded r2q capability when the selected event surface requires rev.",
+      "distinct_contract": "tool:r2q",
+      "evidence": "Rookery implementation at bin/r2q; selected only by capability/profile registry fixtures."
+    },
+    "id": "r2q",
+    "path": "bin/r2q",
+    "purpose": "r2q",
+    "requires_all": [
+      "tool:radare2"
+    ],
+    "requires_any": [
+      "rev"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded range sweep capability when the selected event surface requires network.",
+      "distinct_contract": "tool:range-sweep",
+      "evidence": "Rookery implementation at bin/range-sweep; selected only by capability/profile registry fixtures."
+    },
+    "id": "range-sweep",
+    "path": "bin/range-sweep",
+    "purpose": "range sweep",
+    "requires_all": [],
+    "requires_any": [
+      "network"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded report lint capability when the selected event surface requires core.",
+      "distinct_contract": "tool:report-lint",
+      "evidence": "Rookery implementation at bin/report-lint; selected only by capability/profile registry fixtures."
+    },
+    "id": "report-lint",
+    "path": "bin/report-lint",
+    "purpose": "report lint",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded report new capability when the selected event surface requires core.",
+      "distinct_contract": "tool:report-new",
+      "evidence": "Rookery implementation at bin/report-new; selected only by capability/profile registry fixtures."
+    },
+    "id": "report-new",
+    "path": "bin/report-new",
+    "purpose": "report new",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded response metadata capability when the selected event surface requires scoring-review.",
+      "distinct_contract": "tool:response-metadata",
+      "evidence": "Rookery implementation at bin/response-metadata; selected only by capability/profile registry fixtures."
+    },
+    "id": "response-metadata",
+    "path": "bin/response-metadata",
+    "purpose": "response metadata",
+    "requires_all": [],
+    "requires_any": [
+      "scoring-review"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded retry due capability when the selected event surface requires retries.",
+      "distinct_contract": "tool:retry-due",
+      "evidence": "Rookery implementation at bin/retry-due; selected only by capability/profile registry fixtures."
+    },
+    "id": "retry-due",
+    "path": "bin/retry-due",
+    "purpose": "retry due",
+    "requires_all": [],
+    "requires_any": [
+      "retries"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded retry schedule capability when the selected event surface requires retries.",
+      "distinct_contract": "tool:retry-schedule",
+      "evidence": "Rookery implementation at bin/retry-schedule; selected only by capability/profile registry fixtures."
+    },
+    "id": "retry-schedule",
+    "path": "bin/retry-schedule",
+    "purpose": "retry schedule",
+    "requires_all": [],
+    "requires_any": [
+      "retries"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded rev triage capability when the selected event surface requires rev.",
+      "distinct_contract": "tool:rev-triage",
+      "evidence": "Rookery implementation at bin/rev-triage; selected only by capability/profile registry fixtures."
+    },
+    "id": "rev-triage",
+    "path": "bin/rev-triage",
+    "purpose": "rev triage",
+    "requires_all": [],
+    "requires_any": [
+      "rev"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded reviewer queue capability when the selected event surface requires scoring-review.",
+      "distinct_contract": "tool:reviewer-queue",
+      "evidence": "Rookery implementation at bin/reviewer-queue; selected only by capability/profile registry fixtures."
+    },
+    "id": "reviewer-queue",
+    "path": "bin/reviewer-queue",
+    "purpose": "reviewer queue",
+    "requires_all": [],
+    "requires_any": [
+      "scoring-review"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the canonical Rookery control plane for the core surface.",
+      "distinct_contract": "tool:rookery",
+      "evidence": "Canonical implementation at bin/rookery."
+    },
+    "id": "rookery",
+    "path": "bin/rookery",
+    "purpose": "Rookery control plane",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides bounded Rookery manifest and configuration diagnostics.",
+      "distinct_contract": "tool:rookery-doctor",
+      "evidence": "Canonical implementation at bin/rookery-doctor."
+    },
+    "id": "rookery-doctor",
+    "path": "bin/rookery-doctor",
+    "purpose": "Rookery configuration doctor",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides one preparation path for expected binaries, data files, SearXNG, and a headless browser.",
+      "distinct_contract": "tool:rookery-prepare",
+      "evidence": "Requested canonical setup capability; implemented at bin/rookery-prepare and rookery.portable.preparation."
+    },
+    "id": "rookery-prepare",
+    "path": "bin/rookery-prepare",
+    "purpose": "discover and provision local accelerators",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded runbg capability when the selected event surface requires core.",
+      "distinct_contract": "tool:runbg",
+      "evidence": "Rookery implementation at bin/runbg; selected only by capability/profile registry fixtures."
+    },
+    "id": "runbg",
+    "path": "bin/runbg",
+    "purpose": "runbg",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded runq capability when the selected event surface requires core.",
+      "distinct_contract": "tool:runq",
+      "evidence": "Rookery implementation at bin/runq; selected only by capability/profile registry fixtures."
+    },
+    "id": "runq",
+    "path": "bin/runq",
+    "purpose": "runq",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded safe rg capability when the selected event surface requires core.",
+      "distinct_contract": "tool:safe-rg",
+      "evidence": "Rookery implementation at bin/safe-rg; selected only by capability/profile registry fixtures."
+    },
+    "id": "safe-rg",
+    "path": "bin/safe-rg",
+    "purpose": "safe rg",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded score propose capability when the selected event surface requires scoring-review.",
+      "distinct_contract": "tool:score-propose",
+      "evidence": "Rookery implementation at bin/score-propose; selected only by capability/profile registry fixtures."
+    },
+    "id": "score-propose",
+    "path": "bin/score-propose",
+    "purpose": "score propose",
+    "requires_all": [],
+    "requires_any": [
+      "scoring-review"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded score review capability when the selected event surface requires scoring-review.",
+      "distinct_contract": "tool:score-review",
+      "evidence": "Rookery implementation at bin/score-review; selected only by capability/profile registry fixtures."
+    },
+    "id": "score-review",
+    "path": "bin/score-review",
+    "purpose": "score review",
+    "requires_all": [],
+    "requires_any": [
+      "scoring-review"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded scoring state capability when the selected event surface requires advanced-scoring-review.",
+      "distinct_contract": "tool:scoring-state",
+      "evidence": "Rookery implementation at bin/scoring-state; selected only by capability/profile registry fixtures."
+    },
+    "id": "scoring-state",
+    "path": "bin/scoring-state",
+    "purpose": "scoring state",
+    "requires_all": [],
+    "requires_any": [
+      "advanced-scoring-review"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded searxng capability when the selected event surface requires research.",
+      "distinct_contract": "tool:searxng",
+      "evidence": "Rookery implementation at bin/searxng; selected only by capability/profile registry fixtures."
+    },
+    "id": "searxng",
+    "path": "bin/searxng",
+    "purpose": "query the configured SearXNG service",
+    "requires_all": [
+      "searxng"
+    ],
+    "requires_any": [
+      "research"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded state lint capability when the selected event surface requires core.",
+      "distinct_contract": "tool:state-lint",
+      "evidence": "Rookery implementation at bin/state-lint; selected only by capability/profile registry fixtures."
+    },
+    "id": "state-lint",
+    "path": "bin/state-lint",
+    "purpose": "state lint",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded submission allowance capability when the selected event surface requires advanced-scoring-review.",
+      "distinct_contract": "tool:submission-allowance",
+      "evidence": "Rookery implementation at bin/submission-allowance; selected only by capability/profile registry fixtures."
+    },
+    "id": "submission-allowance",
+    "path": "bin/submission-allowance",
+    "purpose": "submission allowance",
+    "requires_all": [],
+    "requires_any": [
+      "advanced-scoring-review"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded submission reconcile capability when the selected event surface requires advanced-scoring-review.",
+      "distinct_contract": "tool:submission-reconcile",
+      "evidence": "Rookery implementation at bin/submission-reconcile; selected only by capability/profile registry fixtures."
+    },
+    "id": "submission-reconcile",
+    "path": "bin/submission-reconcile",
+    "purpose": "submission reconcile",
+    "requires_all": [],
+    "requires_any": [
+      "advanced-scoring-review"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded tool index capability when the selected event surface requires core.",
+      "distinct_contract": "tool:tool-index",
+      "evidence": "Rookery implementation at bin/tool-index; selected only by capability/profile registry fixtures."
+    },
+    "id": "tool-index",
+    "path": "bin/tool-index",
+    "purpose": "tool index",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded transit source capability when the selected event surface requires research.",
+      "distinct_contract": "tool:transit-source",
+      "evidence": "Rookery implementation at bin/transit-source; selected only by capability/profile registry fixtures."
+    },
+    "id": "transit-source",
+    "path": "bin/transit-source",
+    "purpose": "transit source",
+    "requires_all": [],
+    "requires_any": [
+      "research"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded urlgrab.py capability when the selected event surface requires web.",
+      "distinct_contract": "tool:urlgrab.py",
+      "evidence": "Rookery implementation at bin/urlgrab.py; selected only by capability/profile registry fixtures."
+    },
+    "id": "urlgrab.py",
+    "path": "bin/urlgrab.py",
+    "purpose": "urlgrab.py",
+    "requires_all": [],
+    "requires_any": [
+      "web"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded verdict parse capability when the selected event surface requires scoring-review.",
+      "distinct_contract": "tool:verdict-parse",
+      "evidence": "Rookery implementation at bin/verdict-parse; selected only by capability/profile registry fixtures."
+    },
+    "id": "verdict-parse",
+    "path": "bin/verdict-parse",
+    "purpose": "verdict parse",
+    "requires_all": [],
+    "requires_any": [
+      "scoring-review"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded writeup check capability when the selected event surface requires writeups.",
+      "distinct_contract": "tool:writeup-check",
+      "evidence": "Rookery implementation at bin/writeup-check; selected only by capability/profile registry fixtures."
+    },
+    "id": "writeup-check",
+    "path": "bin/writeup-check",
+    "purpose": "writeup check",
+    "requires_all": [],
+    "requires_any": [
+      "writeups"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded writeup new capability when the selected event surface requires writeups.",
+      "distinct_contract": "tool:writeup-new",
+      "evidence": "Rookery implementation at bin/writeup-new; selected only by capability/profile registry fixtures."
+    },
+    "id": "writeup-new",
+    "path": "bin/writeup-new",
+    "purpose": "writeup new",
+    "requires_all": [],
+    "requires_any": [
+      "writeups"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded xorbrute.py capability when the selected event surface requires crypto.",
+      "distinct_contract": "tool:xorbrute.py",
+      "evidence": "Rookery implementation at bin/xorbrute.py; selected only by capability/profile registry fixtures."
+    },
+    "id": "xorbrute.py",
+    "path": "bin/xorbrute.py",
+    "purpose": "xorbrute.py",
+    "requires_all": [],
+    "requires_any": [
+      "crypto"
+    ]
+  }
+]

@@ -1,0 +1,35 @@
+#!/usr/bin/env -S python3 -I -B
+from __future__ import annotations
+
+import argparse
+
+
+parser = argparse.ArgumentParser(
+    description=(
+        "Retired Rookery browser-capture entry point. Browser network capture "
+        "is disabled until every browser request is scope-mediated."
+    ),
+    allow_abbrev=False,
+)
+parser.add_argument(
+    "--version",
+    action="version",
+    version="playq: browser network capture disabled",
+)
+parser.add_argument("url", nargs="?")
+parser.add_argument("--screenshot", action="store_true")
+parser.add_argument("--pdf", action="store_true")
+parser.add_argument("--dump-dom", action="store_true")
+parser.add_argument("--budget-ms")
+parser.add_argument("--label")
+parser.add_argument("--max-output-bytes")
+parser.add_argument("--max-artifact-bytes")
+parser.add_argument("--network-scope")
+parser.add_argument("--require-subresource-scope", action="store_true")
+parser.parse_args()
+parser.error(
+    "browser_network_scope_unenforced: Rookery browser network capture is "
+    "disabled because redirects, subresources, scripts, WebSockets, DNS changes, "
+    "and downloads are not all scope-mediated; use an operator-managed external "
+    "research boundary outside Rookery evidence"
+)

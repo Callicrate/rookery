@@ -1,0 +1,901 @@
+#!/usr/bin/env -S python3 -I -B
+from __future__ import annotations
+import argparse
+import datetime as dt
+import importlib.util
+import json
+import os
+import re
+import stat
+import sys
+import time
+import urllib.parse
+from pathlib import Path
+from typing import Any
+
+SOURCE_ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path.cwd()
+UTC = dt.timezone.utc
+sys.path.insert(0, str(SOURCE_ROOT / "lib"))
+
+from rookery.portable.environment import (  # noqa: E402
+    EnvClass,
+    EnvKey,
+    EnvironmentPolicyError,
+    read_declared_environment,
+)
+from rookery.portable.optional_helper import require_bound_runtime_workspace  # noqa: E402
+from rookery.portable.scope import (  # noqa: E402
+    CompiledScopeBinding,
+    ScopeAuthorityError,
+    check_url,
+    load_canonical_compiled_scope,
+    verified_canonical_scope_effect,
+)
+from rookery.portable.scoped_transport import (  # noqa: E402
+    connect_scoped_stream,
+    scoped_connection_plan,
+)
+
+
+def _load_immersive_module(name: str):
+    """Load one colocated helper without admitting its directory to sys.path."""
+
+    path = SOURCE_ROOT / "adapters" / "immersive" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"_rookery_immersive_{name}", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("unable to load required Immersive helper module")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_network_policy = _load_immersive_module("network_policy")
+_path_policy = _load_immersive_module("path_policy")
+resolve_network_policy = _network_policy.resolve_network_policy
+ImmersiveOutput = _path_policy.ImmersiveOutput
+ImmersiveOutputError = _path_policy.ImmersiveOutputError
+ImmersiveOutputPlan = _path_policy.ImmersiveOutputPlan
+preflight_immersive_output = _path_policy.preflight_immersive_output
+prepare_immersive_output = _path_policy.prepare_immersive_output
+write_private_output_file = _path_policy.write_private_output_file
+
+
+DEFAULT_MAX_COOKIE_SOURCE_BYTES = 2 * 1024 * 1024
+MAX_COOKIE_SOURCE_BYTES = 8 * 1024 * 1024
+DEFAULT_MAX_COOKIES = 4_096
+MAX_COOKIES = 16_384
+DEFAULT_MAX_COOKIE_HEADER_BYTES = 64 * 1024
+MAX_COOKIE_HEADER_BYTES = 256 * 1024
+DEFAULT_MAX_FRAME_BYTES = 256 * 1024
+MAX_FRAME_BYTES = 4 * 1024 * 1024
+DEFAULT_MAX_MESSAGES = 256
+MAX_MESSAGES = 4_096
+DEFAULT_MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024
+MAX_TRANSCRIPT_BYTES = 16 * 1024 * 1024
+MIN_TRANSCRIPT_BYTES = 4 * 1024
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
+MAX_CONNECT_TIMEOUT_SECONDS = 60
+MAX_WALL_SECONDS = 300
+MAX_SUBSCRIPTIONS = 32
+MAX_IDENTIFIER_BYTES = 8 * 1024
+MAX_COOKIE_FIELD_BYTES = 8 * 1024
+_COOKIE_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+_CAPTURE_FAMILY_PARTS = ("evidence", "immersive")
+_EFFECT_BINDING: CompiledScopeBinding | None = None
+
+
+class CookieSourceError(RuntimeError):
+    """A safe-to-report cookie-source refusal that never contains cookie values."""
+
+
+def _bounded_error(error: BaseException, maximum: int = 512) -> str:
+    value = str(error).replace("\r", " ").replace("\n", " ").strip()
+    return value.encode("utf-8", errors="replace")[:maximum].decode(
+        "utf-8", errors="ignore"
+    )
+
+
+def _validate_limit(name: str, value: int, minimum: int, maximum: int) -> int:
+    if value < minimum or value > maximum:
+        raise ValueError(f"{name} is outside the supported range")
+    return value
+
+
+def _preflight_capture_outdir(root: Path, raw_outdir: str) -> ImmersiveOutputPlan:
+    """Read-only output admission before dotenv, scope, or network work."""
+
+    return preflight_immersive_output(
+        root,
+        family_parts=_CAPTURE_FAMILY_PARTS,
+        raw_outdir=raw_outdir,
+        default_label="cluster-capture",
+    )
+
+
+def _prepare_capture_output(
+    root: Path, plan: ImmersiveOutputPlan, binding: CompiledScopeBinding
+) -> ImmersiveOutput:
+    """Create/migrate only the output already admitted by preflight."""
+
+    with _scope_effect(binding):
+        return prepare_immersive_output(
+            root,
+            family_parts=_CAPTURE_FAMILY_PARTS,
+            raw_outdir="",
+            default_label="cluster-capture",
+            plan=plan,
+        )
+
+
+def iso():
+    return dt.datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def stamp():
+    return dt.datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def private_write_text(p: Path, text: str, *, errors: str = "strict"):
+    data = text.encode("utf-8", errors=errors)
+    if _EFFECT_BINDING is None:
+        write_private_output_file(p, data)
+        return
+    with _scope_effect(_EFFECT_BINDING):
+        write_private_output_file(p, data)
+
+
+_IMMERSIVE_ENV_KEYS = (
+    EnvKey("IMMERSIVE_ACTIONCABLE_URL", EnvClass.ROOKERY_CONFIG),
+    EnvKey("ACTIONCABLE_URL", EnvClass.ROOKERY_CONFIG),
+    EnvKey("IMMERSIVE_NETWORK_ENV_KEYS", EnvClass.ROOKERY_CONFIG),
+    EnvKey("IMMERSIVE_COOKIES_FILE", EnvClass.SESSION_SECRET_REF),
+    EnvKey("COOKIES_LATEST", EnvClass.SESSION_SECRET_REF),
+    EnvKey("COOKIES_FILE", EnvClass.SESSION_SECRET_REF),
+    EnvKey("IMMERSIVE_ORIGIN", EnvClass.ROOKERY_CONFIG),
+)
+
+
+def read_env():
+    """Resolve only declared runtime references from the supplied child mapping."""
+
+    return dict(read_declared_environment(ROOT, _IMMERSIVE_ENV_KEYS).values)
+
+
+def jwrite(p: Path, obj):
+    private_write_text(
+        p,
+        json.dumps(obj, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+    )
+
+
+def write_bounded_json(p: Path, obj: object, maximum: int) -> None:
+    text = json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n"
+    if len(text.encode("utf-8", errors="replace")) > maximum:
+        raise RuntimeError("private evidence exceeds configured byte limit")
+    private_write_text(p, text)
+
+
+def _binding_fields(binding: CompiledScopeBinding) -> dict[str, int | str]:
+    return {
+        "scope_generation": binding.scope_generation,
+        "stop_generation": binding.stop_generation,
+        "file_sha256": binding.file_sha256,
+        "content_sha256": binding.content_sha256,
+        "launch_binding_sha256": binding.launch_binding_sha256,
+    }
+
+
+def _scope_effect(binding: CompiledScopeBinding):
+    return verified_canonical_scope_effect(
+        ROOT,
+        **_binding_fields(binding),
+    )
+
+
+def _activate_effect_binding(binding: CompiledScopeBinding) -> None:
+    global _EFFECT_BINDING
+    _EFFECT_BINDING = binding
+
+
+def scope_guard_url(url: str) -> CompiledScopeBinding:
+    """Load and check the canonical compiled scope before connector access."""
+
+    binding = load_canonical_compiled_scope(ROOT)
+    decision = check_url(binding.scope, url, platform=True)
+    if not decision.allowed:
+        raise RuntimeError(f"WebSocket blocked by scope: {decision.reason}")
+    return binding
+
+
+def _read_cookie_source(path: Path, maximum: int) -> bytes:
+    """Read one regular cookie export with a descriptor-level no-follow check."""
+
+    try:
+        source_info = os.lstat(path)
+    except OSError as exc:
+        raise CookieSourceError("cookie source is unavailable") from exc
+    if (
+        stat.S_ISLNK(source_info.st_mode)
+        or not stat.S_ISREG(source_info.st_mode)
+        or source_info.st_nlink != 1
+    ):
+        raise CookieSourceError("cookie source must be a regular non-symlink file")
+    if source_info.st_size > maximum:
+        raise CookieSourceError("cookie source exceeds configured byte limit")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, flags)
+        opened_info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened_info.st_mode)
+            or opened_info.st_nlink != 1
+            or (opened_info.st_dev, opened_info.st_ino)
+            != (source_info.st_dev, source_info.st_ino)
+        ):
+            raise CookieSourceError("cookie source must be a regular file")
+        if opened_info.st_size > maximum:
+            raise CookieSourceError("cookie source exceeds configured byte limit")
+        data = bytearray()
+        while True:
+            chunk = os.read(descriptor, min(64 * 1024, maximum + 1 - len(data)))
+            if not chunk:
+                return bytes(data)
+            data.extend(chunk)
+            if len(data) > maximum:
+                raise CookieSourceError("cookie source exceeds configured byte limit")
+    except OSError as exc:
+        raise CookieSourceError("cookie source cannot be opened safely") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _cookie_records(raw: bytes, maximum: int) -> list[dict[str, Any]]:
+    """Accept bounded browser JSON or Netscape exports, never raw Cookie headers."""
+
+    stripped = raw.lstrip(b"\xef\xbb\xbf \t\r\n")
+    if stripped.startswith((b"{", b"[")):
+        try:
+            parsed = json.loads(raw.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CookieSourceError("cookie source is not valid JSON") from exc
+        records: list[dict[str, Any]] = []
+        nodes = 0
+        stack = [parsed]
+        while stack:
+            item = stack.pop()
+            nodes += 1
+            if nodes > maximum * 16:
+                raise CookieSourceError(
+                    "cookie source structure exceeds configured limit"
+                )
+            if isinstance(item, dict):
+                if "name" in item and "value" in item:
+                    records.append(item)
+                    if len(records) > maximum:
+                        raise CookieSourceError("cookie source has too many cookies")
+                else:
+                    stack.extend(reversed(tuple(item.values())))
+            elif isinstance(item, list):
+                stack.extend(reversed(item))
+        return records
+
+    records = []
+    for line in raw.splitlines():
+        if not line or line.startswith(b"#"):
+            continue
+        fields = line.split(b"\t")
+        if len(fields) != 7:
+            raise CookieSourceError("cookie source must be a structured cookie export")
+        try:
+            domain, domain_flag, path, secure, expires, name, value = (
+                field.decode("utf-8") for field in fields
+            )
+        except UnicodeDecodeError as exc:
+            raise CookieSourceError("cookie source is not valid UTF-8") from exc
+        records.append(
+            {
+                "name": name,
+                "value": value,
+                "domain": domain,
+                "path": path,
+                "secure": secure.casefold() == "true",
+                "hostOnly": domain_flag.casefold() != "true",
+                "expires": expires,
+            }
+        )
+        if len(records) > maximum:
+            raise CookieSourceError("cookie source has too many cookies")
+    return records
+
+
+def _bounded_cookie_text(value: object, label: str) -> str:
+    if not isinstance(value, str):
+        raise CookieSourceError(f"cookie {label} is invalid")
+    if len(value.encode("utf-8", errors="replace")) > MAX_COOKIE_FIELD_BYTES:
+        raise CookieSourceError(f"cookie {label} exceeds configured byte limit")
+    return value
+
+
+def _normalized_host(value: str) -> str:
+    candidate = value.rstrip(".").casefold()
+    if not candidate:
+        raise CookieSourceError("cookie destination has no host")
+    try:
+        return candidate.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise CookieSourceError("cookie domain is invalid") from exc
+
+
+def _cookie_expired(value: object) -> bool:
+    if value in (None, "", False, 0, "0"):
+        return False
+    try:
+        return float(value) <= time.time()
+    except (TypeError, ValueError):
+        # An unknown expiry must not be treated as a trustworthy persistent cookie.
+        return True
+
+
+def _path_matches(cookie_path: str, target_path: str) -> bool:
+    if cookie_path == target_path:
+        return True
+    return target_path.startswith(cookie_path) and (
+        cookie_path.endswith("/")
+        or (
+            len(target_path) > len(cookie_path) and target_path[len(cookie_path)] == "/"
+        )
+    )
+
+
+def cookie_header_for_url(
+    source: Path,
+    destination_url: str,
+    *,
+    max_source_bytes: int = DEFAULT_MAX_COOKIE_SOURCE_BYTES,
+    max_cookies: int = DEFAULT_MAX_COOKIES,
+    max_header_bytes: int = DEFAULT_MAX_COOKIE_HEADER_BYTES,
+) -> str:
+    """Build a cookie header only from cookies valid for this exact destination."""
+
+    _validate_limit(
+        "max cookie source bytes", max_source_bytes, 1, MAX_COOKIE_SOURCE_BYTES
+    )
+    _validate_limit("max cookies", max_cookies, 1, MAX_COOKIES)
+    _validate_limit(
+        "max cookie header bytes", max_header_bytes, 1, MAX_COOKIE_HEADER_BYTES
+    )
+    parsed = urllib.parse.urlsplit(destination_url)
+    if parsed.scheme.casefold() not in {"http", "https", "ws", "wss"}:
+        raise CookieSourceError("cookie destination has an unsupported scheme")
+    if parsed.username is not None or parsed.password is not None:
+        raise CookieSourceError("cookie destination must not include credentials")
+    destination_host = _normalized_host(parsed.hostname or "")
+    destination_path = parsed.path or "/"
+    secure_destination = parsed.scheme.casefold() in {"https", "wss"}
+    selected: list[tuple[int, int, str]] = []
+    for index, raw_cookie in enumerate(
+        _cookie_records(_read_cookie_source(source, max_source_bytes), max_cookies)
+    ):
+        name = _bounded_cookie_text(raw_cookie.get("name"), "name")
+        value = _bounded_cookie_text(raw_cookie.get("value"), "value")
+        raw_domain = _bounded_cookie_text(raw_cookie.get("domain", ""), "domain")
+        raw_path = _bounded_cookie_text(raw_cookie.get("path", "/"), "path") or "/"
+        if not _COOKIE_NAME.fullmatch(name) or any(
+            character in value for character in "\r\n;"
+        ):
+            raise CookieSourceError("cookie name or value is unsafe")
+        if not raw_path.startswith("/"):
+            raise CookieSourceError("cookie path is invalid")
+        cookie_domain = _normalized_host(raw_domain.lstrip("."))
+        host_only = bool(raw_cookie.get("hostOnly", not raw_domain.startswith(".")))
+        domain_matches = (
+            destination_host == cookie_domain
+            if host_only
+            else destination_host == cookie_domain
+            or destination_host.endswith("." + cookie_domain)
+        )
+        if (
+            not domain_matches
+            or not _path_matches(raw_path, destination_path)
+            or (bool(raw_cookie.get("secure")) and not secure_destination)
+            or _cookie_expired(raw_cookie.get("expires"))
+        ):
+            continue
+        selected.append((-len(raw_path), index, f"{name}={value}"))
+    selected.sort()
+    pairs: list[str] = []
+    total = 0
+    for _path_length, _index, pair in selected:
+        encoded = pair.encode("utf-8", errors="replace")
+        prospective = total + len(encoded) + (2 if pairs else 0)
+        if prospective > max_header_bytes:
+            raise CookieSourceError("cookie header exceeds configured byte limit")
+        pairs.append(pair)
+        total = prospective
+    return "; ".join(pairs)
+
+
+def _main():
+    os.umask(0o077)
+    ap = argparse.ArgumentParser(
+        description="Capture Immersive/ActionCable runtime cluster metadata and transcripts."
+    )
+    ap.add_argument(
+        "--url",
+        default=None,
+        help="ActionCable websocket URL. Env: IMMERSIVE_ACTIONCABLE_URL",
+    )
+    ap.add_argument(
+        "--cookies",
+        default=None,
+        help="cookie JSON/header file. Env: IMMERSIVE_COOKIES_FILE/COOKIES_LATEST",
+    )
+    ap.add_argument("--activity-id", default="")
+    ap.add_argument("--attempt-id", default="")
+    ap.add_argument("--cluster-id", default="")
+    ap.add_argument("--seconds", type=int, default=25)
+    ap.add_argument(
+        "--channel",
+        action="append",
+        default=[],
+        help="channel name, default AttemptChannel and ClusterChannel",
+    )
+    ap.add_argument(
+        "--identifier-json",
+        action="append",
+        default=[],
+        help="raw ActionCable identifier JSON string",
+    )
+    ap.add_argument(
+        "--insecure",
+        action="store_true",
+        help="rejected: TLS certificate verification cannot be disabled",
+    )
+    ap.add_argument(
+        "--connect-timeout-seconds", type=int, default=DEFAULT_CONNECT_TIMEOUT_SECONDS
+    )
+    ap.add_argument("--max-frame-bytes", type=int, default=DEFAULT_MAX_FRAME_BYTES)
+    ap.add_argument("--max-messages", type=int, default=DEFAULT_MAX_MESSAGES)
+    ap.add_argument(
+        "--max-transcript-bytes", type=int, default=DEFAULT_MAX_TRANSCRIPT_BYTES
+    )
+    ap.add_argument(
+        "--max-cookie-source-bytes",
+        type=int,
+        default=DEFAULT_MAX_COOKIE_SOURCE_BYTES,
+    )
+    ap.add_argument("--max-cookies", type=int, default=DEFAULT_MAX_COOKIES)
+    ap.add_argument(
+        "--max-cookie-header-bytes",
+        type=int,
+        default=DEFAULT_MAX_COOKIE_HEADER_BYTES,
+    )
+    ap.add_argument("--outdir", default="")
+    args = ap.parse_args()
+    require_bound_runtime_workspace(ROOT)
+    if args.insecure:
+        print(
+            "--insecure is rejected: TLS certificate verification is required",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        _validate_limit("seconds", args.seconds, 1, MAX_WALL_SECONDS)
+        _validate_limit(
+            "connect timeout",
+            args.connect_timeout_seconds,
+            1,
+            MAX_CONNECT_TIMEOUT_SECONDS,
+        )
+        _validate_limit("max frame bytes", args.max_frame_bytes, 1, MAX_FRAME_BYTES)
+        _validate_limit("max messages", args.max_messages, 1, MAX_MESSAGES)
+        _validate_limit(
+            "max transcript bytes",
+            args.max_transcript_bytes,
+            MIN_TRANSCRIPT_BYTES,
+            MAX_TRANSCRIPT_BYTES,
+        )
+        _validate_limit(
+            "max cookie source bytes",
+            args.max_cookie_source_bytes,
+            1,
+            MAX_COOKIE_SOURCE_BYTES,
+        )
+        _validate_limit("max cookies", args.max_cookies, 1, MAX_COOKIES)
+        _validate_limit(
+            "max cookie header bytes",
+            args.max_cookie_header_bytes,
+            1,
+            MAX_COOKIE_HEADER_BYTES,
+        )
+    except ValueError as exc:
+        ap.error(str(exc))
+    try:
+        capture_outdir = _preflight_capture_outdir(ROOT, args.outdir)
+    except ImmersiveOutputError:
+        print("Immersive output directory is invalid or not owned", file=sys.stderr)
+        return 2
+    env = read_env()
+    url = (
+        args.url
+        or env.get("IMMERSIVE_ACTIONCABLE_URL")
+        or env.get("ACTIONCABLE_URL")
+        or ""
+    )
+    if not url:
+        print(
+            "IMMERSIVE_ACTIONCABLE_URL missing. Set it or pass --url.", file=sys.stderr
+        )
+        return 2
+    try:
+        binding = scope_guard_url(url)
+    except ScopeAuthorityError:
+        print("scope denied before WebSocket connection", file=sys.stderr)
+        return 4
+    except (OSError, RuntimeError, TypeError, ValueError):
+        print("scope denied before WebSocket connection", file=sys.stderr)
+        return 4
+    _activate_effect_binding(binding)
+    try:
+        network = resolve_network_policy(
+            ROOT, env.get("IMMERSIVE_NETWORK_ENV_KEYS")
+        )
+    except (EnvironmentPolicyError, ValueError):
+        print("Immersive network configuration is invalid", file=sys.stderr)
+        return 2
+    try:
+        # Plan the one permitted DNS answer set before this helper creates an
+        # output bundle, reads a cookie, or starts a WebSocket client.  A
+        # selected proxy is rejected by the route policy before DNS or sockets.
+        with _scope_effect(binding) as current_binding:
+            connection_plan = scoped_connection_plan(
+                current_binding.scope,
+                url,
+                route_policy=network,
+                platform=True,
+            )
+    except (EnvironmentPolicyError, OSError, RuntimeError, TypeError, ValueError):
+        print("Immersive network configuration is invalid", file=sys.stderr)
+        return 2
+    try:
+        output = _prepare_capture_output(ROOT, capture_outdir, binding)
+    except ImmersiveOutputError:
+        print("Immersive output directory is invalid or not owned", file=sys.stderr)
+        return 2
+    outdir = output.path
+    try:
+        output.guard()
+    except ImmersiveOutputError:
+        print("Immersive output directory changed or is no longer owned", file=sys.stderr)
+        return 2
+    cookie_path = (
+        Path(
+            args.cookies
+            or env.get("IMMERSIVE_COOKIES_FILE")
+            or env.get("COOKIES_LATEST")
+            or env.get("COOKIES_FILE")
+            or ""
+        )
+        if (
+            args.cookies
+            or env.get("IMMERSIVE_COOKIES_FILE")
+            or env.get("COOKIES_LATEST")
+            or env.get("COOKIES_FILE")
+        )
+        else None
+    )
+    try:
+        output.guard()
+    except ImmersiveOutputError:
+        print("Immersive output directory changed or is no longer owned", file=sys.stderr)
+        return 2
+    try:
+        with _scope_effect(binding):
+            cookie_header = (
+                cookie_header_for_url(
+                    cookie_path,
+                    url,
+                    max_source_bytes=args.max_cookie_source_bytes,
+                    max_cookies=args.max_cookies,
+                    max_header_bytes=args.max_cookie_header_bytes,
+                )
+                if cookie_path
+                else ""
+            )
+    except CookieSourceError as exc:
+        err = {
+            "created_at": iso(),
+            "url": url,
+            "status": "input_limit",
+            "error": _bounded_error(exc),
+        }
+        jwrite(outdir / "connection_error.json", err)
+        print("cookie source rejected before WebSocket connection", file=sys.stderr)
+        return 5
+    channels = args.channel or ["AttemptChannel", "ClusterChannel"]
+    if (
+        len(channels) > MAX_SUBSCRIPTIONS
+        or len(args.identifier_json) > MAX_SUBSCRIPTIONS
+    ):
+        jwrite(
+            outdir / "connection_error.json",
+            {
+                "created_at": iso(),
+                "url": url,
+                "status": "input_limit",
+                "error": "subscription count exceeds configured limit",
+            },
+        )
+        return 5
+    identifiers = []
+    for raw in args.identifier_json:
+        identifiers.append(raw)
+    base = {}
+    if args.activity_id:
+        base["activity_id"] = args.activity_id
+    if args.attempt_id:
+        base["attempt_id"] = args.attempt_id
+    if args.cluster_id:
+        base["cluster_id"] = args.cluster_id
+    for ch in channels:
+        obj = {"channel": ch}
+        obj.update(base)
+        identifiers.append(json.dumps(obj, separators=(",", ":")))
+    if len(identifiers) > MAX_SUBSCRIPTIONS or any(
+        len(identifier.encode("utf-8", errors="replace")) > MAX_IDENTIFIER_BYTES
+        for identifier in identifiers
+    ):
+        jwrite(
+            outdir / "connection_error.json",
+            {
+                "created_at": iso(),
+                "url": url,
+                "status": "input_limit",
+                "error": "subscription identifier exceeds configured limit",
+            },
+        )
+        return 5
+    meta = {
+        "created_at": iso(),
+        "url": url,
+        "cookie_present": bool(cookie_header),
+        "network_environment": network.metadata(),
+        "activity_id": args.activity_id,
+        "attempt_id": args.attempt_id,
+        "cluster_id": args.cluster_id,
+        "seconds": args.seconds,
+        "identifiers": identifiers,
+        "limits": {
+            "frame_bytes": args.max_frame_bytes,
+            "messages": args.max_messages,
+            "transcript_bytes": args.max_transcript_bytes,
+        },
+    }
+    jwrite(outdir / "request_meta.json", meta)
+    try:
+        import websocket  # type: ignore
+    except Exception as e:
+        private_write_text(
+            outdir / "ERROR.txt",
+            "Missing websocket-client Python package. Install with: pipx inject or pip install websocket-client\n"
+            + _bounded_error(e)
+            + "\n",
+        )
+        print(
+            f"missing dependency; wrote {output.metadata_path}/ERROR.txt",
+            file=sys.stderr,
+        )
+        return 3
+    headers = []
+    if cookie_header:
+        headers.append("Cookie: " + cookie_header)
+    origin = (env.get("IMMERSIVE_ORIGIN") or "").strip()
+    if origin:
+        origin_decision = check_url(binding.scope, origin, platform=True)
+        if not origin_decision.allowed:
+            jwrite(
+                outdir / "connection_error.json",
+                {
+                    "created_at": iso(),
+                    "url": url,
+                    "status": "scope_denied",
+                    "error": "WebSocket Origin is outside declared scope",
+                },
+            )
+            return 4
+        headers.append("Origin: " + origin)
+    try:
+        output.guard()
+    except ImmersiveOutputError:
+        print("Immersive output directory changed or is no longer owned", file=sys.stderr)
+        return 2
+    stream = None
+    try:
+        with _scope_effect(binding):
+            stream = connect_scoped_stream(
+                connection_plan,
+                timeout=min(args.connect_timeout_seconds, args.seconds),
+                tls_context=network.trust_context,
+            )
+            ws = websocket.create_connection(
+                url,
+                socket=stream,
+                header=headers,
+                timeout=min(args.connect_timeout_seconds, args.seconds),
+                redirect_limit=0,
+            )
+            stream = None  # ownership transfers to websocket-client on success.
+    except Exception as e:
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
+        err = {
+            "created_at": iso(),
+            "url": url,
+            "status": "connection_error",
+            "error": _bounded_error(e),
+            "note": "Connection failed before subscription; check URL, VPN, cookies, or auth freshness.",
+        }
+        jwrite(outdir / "connection_error.json", err)
+        private_write_text(outdir / "ERROR.txt", _bounded_error(e) + "\n")
+        print(
+            f"connection failed; wrote {output.metadata_path}/connection_error.json",
+            file=sys.stderr,
+        )
+        return 4
+    transcript: list[dict[str, Any]] = []
+    received_bytes = 0
+    stored_event_bytes = 0
+    termination = "completed"
+    reason = "wall_deadline_reached"
+    try:
+        # ActionCable protocol negotiation.
+        for ident in identifiers:
+            msg = {"command": "subscribe", "identifier": ident}
+            encoded = json.dumps(msg, separators=(",", ":")).encode("utf-8")
+            if len(encoded) > args.max_frame_bytes:
+                termination = "input_limit"
+                reason = "subscription_frame_bytes"
+                break
+            ws.send(encoded.decode("utf-8"))
+        deadline = time.monotonic() + args.seconds
+        while termination == "completed":
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                termination = "timeout"
+                reason = "wall_deadline_reached"
+                break
+            settimeout = getattr(ws, "settimeout", None)
+            if callable(settimeout):
+                settimeout(min(1.0, max(0.001, remaining)))
+            try:
+                raw = ws.recv()
+            except Exception as e:
+                if "timeout" in type(e).__name__.casefold():
+                    continue
+                termination = "connection_error"
+                reason = "receive_error"
+                break
+            raw_bytes = (
+                bytes(raw)
+                if isinstance(raw, (bytes, bytearray))
+                else str(raw).encode("utf-8", errors="replace")
+            )
+            if len(raw_bytes) > args.max_frame_bytes:
+                termination = "output_limit"
+                reason = "frame_bytes"
+                break
+            if len(transcript) >= args.max_messages:
+                termination = "output_limit"
+                reason = "message_count"
+                break
+            received_bytes += len(raw_bytes)
+            if received_bytes > args.max_transcript_bytes:
+                termination = "output_limit"
+                reason = "aggregate_frame_bytes"
+                break
+            rec: dict[str, Any] = {
+                "ts": iso(),
+                "dir": "in",
+                "raw": raw_bytes.decode("utf-8", errors="replace"),
+            }
+            try:
+                rec["json"] = json.loads(rec["raw"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+            event_bytes = len(
+                json.dumps(rec, ensure_ascii=False, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+            ) + (1 if transcript else 0)
+            if stored_event_bytes + event_bytes + 1024 > args.max_transcript_bytes:
+                termination = "output_limit"
+                reason = "transcript_evidence_bytes"
+                break
+            transcript.append(rec)
+            stored_event_bytes += event_bytes
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            pass
+    write_bounded_json(
+        outdir / "transcript.json",
+        {
+            "created_at": iso(),
+            "events": transcript,
+            "termination": termination,
+            "reason": reason,
+            "message_count": len(transcript),
+            "received_frame_bytes": received_bytes,
+            "stored_event_bytes": stored_event_bytes,
+        },
+        args.max_transcript_bytes,
+    )
+    # Extract likely cluster/runtime objects for fast agent consumption.
+    clusters = []
+    cluster_bytes = 0
+    for ev in transcript:
+        data = ev.get("json") or {}
+        payload = data.get("message") if isinstance(data, dict) else None
+        if isinstance(payload, dict):
+            text = json.dumps(payload, ensure_ascii=False).lower()
+            if any(
+                k in text
+                for k in [
+                    "cluster",
+                    "console",
+                    "guacamole",
+                    "rdp",
+                    "ssh",
+                    "host",
+                    "ip",
+                    "question",
+                ]
+            ):
+                candidate_bytes = len(
+                    json.dumps(
+                        payload, ensure_ascii=False, separators=(",", ":")
+                    ).encode("utf-8")
+                )
+                if cluster_bytes + candidate_bytes + 1024 <= args.max_transcript_bytes:
+                    clusters.append(payload)
+                    cluster_bytes += candidate_bytes
+    write_bounded_json(
+        outdir / "cluster_candidates.json",
+        {
+            "created_at": iso(),
+            "items": clusters,
+            "stored_candidate_bytes": cluster_bytes,
+        },
+        args.max_transcript_bytes,
+    )
+    private_write_text(
+        outdir / "SUMMARY.md",
+        f"# ActionCable Cluster Capture\n\nCreated: {iso()}\n\nTermination: {termination} ({reason})\nEvents: {len(transcript)}\nCluster-like payloads: {len(clusters)}\n\nFiles:\n- request_meta.json\n- transcript.json\n- cluster_candidates.json\n",
+    )
+    print(output.metadata_path)
+    return 0 if termination == "completed" else 5
+
+
+def main():
+    try:
+        return _main()
+    except ScopeAuthorityError:
+        print("canonical scope authority changed before Immersive effect", file=sys.stderr)
+        return 4
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

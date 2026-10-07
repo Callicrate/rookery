@@ -1,0 +1,72 @@
+#!/usr/bin/env -S python3 -I -B
+"""Repository-agnostic workspace change summary for non-git CTF folders."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+from pathlib import Path
+
+ROOT = Path.cwd()
+UTC = dt.timezone.utc
+SKIP = {"knowledge/ctf_knowledge.sqlite3", ".git", "__pycache__"}
+SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", "env"}
+
+
+def iso_ts(t):
+    return dt.datetime.fromtimestamp(t, UTC).isoformat().replace("+00:00", "Z")
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Summarize recent file changes without requiring git.")
+    ap.add_argument("--since-minutes", type=int, default=240)
+    ap.add_argument("--limit", type=int, default=250)
+    ap.add_argument("--scan-limit", type=int, default=100000)
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+    if args.scan_limit <= 0:
+        ap.error("--scan-limit must be positive")
+    cutoff = dt.datetime.now(UTC).timestamp() - args.since_minutes * 60
+    rows = []
+    scanned = 0
+    truncated = False
+    for p in ROOT.rglob("*"):
+        if any(part in SKIP_DIRS for part in p.parts):
+            continue
+        if not p.is_file():
+            continue
+        if scanned >= args.scan_limit:
+            truncated = True
+            break
+        scanned += 1
+        try:
+            st = p.stat()
+        except Exception:
+            continue
+        rel = str(p.relative_to(ROOT))
+        if rel in SKIP:
+            continue
+        if st.st_mtime >= cutoff:
+            rows.append({"path": rel, "mtime": iso_ts(st.st_mtime), "size": st.st_size})
+    rows.sort(key=lambda x: x["mtime"], reverse=True)
+    out = {
+        "since_minutes": args.since_minutes,
+        "count": len(rows),
+        "scanned_files": scanned,
+        "truncated": truncated,
+        "files": rows[: args.limit],
+    }
+    if args.json:
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+    else:
+        print(f"changed_files={len(rows)} since_minutes={args.since_minutes}")
+        if truncated:
+            print(f"scan_truncated=true scanned_files={scanned} scan_limit={args.scan_limit}")
+        for r in rows[: args.limit]:
+            print(f"- {r['mtime']} {r['size']:>8} {r['path']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

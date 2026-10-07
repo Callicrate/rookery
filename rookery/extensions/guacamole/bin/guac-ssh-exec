@@ -1,0 +1,374 @@
+#!/usr/bin/env -S python3 -I -B
+from __future__ import annotations
+import argparse
+import datetime as dt
+import json
+import importlib.util
+import os
+import shutil
+import stat
+import sys
+import time
+from pathlib import Path
+
+SOURCE_ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path.cwd()
+UTC = dt.timezone.utc
+BIN_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(SOURCE_ROOT / "lib"))
+EXTENSION_ROOT = Path(__file__).resolve().parents[1]
+
+from rookery.portable.adapters import (  # noqa: E402
+    render_argv_template,
+    run_bounded_argv,
+)
+from rookery.portable.control import mutation_guard  # noqa: E402
+from rookery.portable.environment import EnvironmentPolicyError  # noqa: E402
+from rookery.portable.optional_helper import require_bound_runtime_workspace  # noqa: E402
+from rookery.portable.store import EventStore  # noqa: E402
+from rookery.portable.util import file_lock  # noqa: E402
+
+
+def _load_extension_module(name: str):
+    """Load one colocated extension module without admitting it to sys.path."""
+
+    path = EXTENSION_ROOT / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"_rookery_guac_{name}", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("unable to load required Guacamole helper module")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_guac_environment = _load_extension_module("guac_environment")
+_guac_paths = _load_extension_module("guac_paths")
+guac_minimal_environment = _guac_environment.guac_minimal_environment
+interactive_desktop_environment = _guac_environment.interactive_desktop_environment
+read_guac_configuration = _guac_environment.read_guac_configuration
+transport_child_environment = _guac_environment.transport_child_environment
+GuacOutput = _guac_paths.GuacOutput
+GuacOutputPathError = _guac_paths.GuacOutputPathError
+resolve_guac_output = _guac_paths.resolve_guac_output
+
+DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024
+MAX_OUTPUT_BYTES = 32 * 1024 * 1024
+MAX_CMD_FILE_BYTES = 1024 * 1024
+MAX_COMMAND_LINES = 4096
+MAX_COMMAND_LINE_BYTES = 64 * 1024
+MAX_COMMAND_BYTES = 1024 * 1024
+
+
+def iso():
+    return dt.datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def stamp():
+    return dt.datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _read_cmd_file(path_text: str) -> list[str]:
+    path = Path(path_text)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError(f"unable to safely open --cmd-file: {path}") from exc
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("--cmd-file must be a regular file")
+        if info.st_size > MAX_CMD_FILE_BYTES:
+            raise ValueError("--cmd-file exceeds byte limit")
+        chunks: list[bytes] = []
+        remaining = MAX_CMD_FILE_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        if len(raw) > MAX_CMD_FILE_BYTES:
+            raise ValueError("--cmd-file exceeds byte limit")
+    finally:
+        os.close(descriptor)
+    lines = raw.splitlines()
+    if len(lines) > MAX_COMMAND_LINES:
+        raise ValueError("--cmd-file exceeds line limit")
+    if any(len(line) > MAX_COMMAND_LINE_BYTES for line in lines):
+        raise ValueError("--cmd-file contains an overlong command")
+    return [line.decode("utf-8", errors="replace") for line in lines if line.strip()]
+
+
+def _validate_commands(commands: list[str]) -> None:
+    if len(commands) > MAX_COMMAND_LINES:
+        raise ValueError("command count exceeds line limit")
+    total = 0
+    for command in commands:
+        size = len(command.encode("utf-8", errors="replace"))
+        if size > MAX_COMMAND_LINE_BYTES:
+            raise ValueError("command exceeds per-line byte limit")
+        total += size
+    if total > MAX_COMMAND_BYTES:
+        raise ValueError("commands exceed aggregate byte limit")
+
+
+def jwrite(output: GuacOutput, name: str, obj):
+    output.write_text(
+        name, json.dumps(obj, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    )
+
+
+def main():
+    os.umask(0o077)
+    ap = argparse.ArgumentParser(
+        description="SSH-terminal-oriented Guacamole keystroke helper. Sends commands without desktop hotkeys when configured."
+    )
+    ap.add_argument("commands", nargs="*", help="commands to send")
+    ap.add_argument("--cmd-file", help="newline commands file")
+    ap.add_argument(
+        "--profile",
+        default="ssh-terminal",
+        choices=["ssh-terminal", "rdp-desktop", "windows-desktop", "browser-only"],
+    )
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--delay", type=float, default=0.15)
+    ap.add_argument("--outdir", default=None)
+    ap.add_argument("--contact-sheet", action="store_true")
+    ap.add_argument(
+        "--max-output-bytes",
+        type=int,
+        default=DEFAULT_MAX_OUTPUT_BYTES,
+    )
+    args = ap.parse_args()
+    require_bound_runtime_workspace(ROOT)
+    if args.max_output_bytes <= 0:
+        ap.error("--max-output-bytes must be positive")
+    args.max_output_bytes = min(args.max_output_bytes, MAX_OUTPUT_BYTES)
+    if args.delay < 0 or args.delay > 5:
+        ap.error("--delay must be between 0 and 5 seconds")
+    commands = list(args.commands)
+    try:
+        output = resolve_guac_output(
+            ROOT,
+            args.outdir,
+            default_parts=("exec", stamp()),
+        )
+    except GuacOutputPathError as error:
+        ap.error(str(error))
+    outdir = output.path
+    if args.cmd_file:
+        try:
+            commands += _read_cmd_file(args.cmd_file)
+        except ValueError as exc:
+            ap.error(str(exc))
+    try:
+        _validate_commands(commands)
+    except ValueError as exc:
+        ap.error(str(exc))
+    if not commands:
+        print("no commands supplied", file=sys.stderr)
+        return 2
+    try:
+        configuration = read_guac_configuration(ROOT)
+        legacy_template = (
+            configuration.get("GUAC_SSH_EXEC_COMMAND")
+            or configuration.get("GUAC_EXEC_COMMAND")
+            or ""
+        )
+        argv_json = (
+            configuration.get("GUAC_SSH_EXEC_ARGV")
+            or configuration.get("GUAC_EXEC_ARGV")
+            or ""
+        )
+        if argv_json:
+            command_argv = render_argv_template(
+                json.loads(argv_json),
+                {
+                    "commands_file": str(outdir / "commands.txt"),
+                    "profile": args.profile,
+                    "outdir": str(outdir),
+                },
+                label="guacamole ssh exec",
+            )
+            command_environment = transport_child_environment(
+                ROOT,
+                configuration,
+                policy_name="guac-ssh-exec-transport",
+                keys_control="GUAC_SSH_EXEC_ENV_KEYS",
+            )
+        else:
+            command_argv = None
+            command_environment = None
+        xdotool_environment = (
+            interactive_desktop_environment(ROOT)
+            if not legacy_template and not argv_json
+            else None
+        )
+        xdotool_path = (
+            shutil.which("xdotool", path=xdotool_environment.values.get("PATH"))
+            if xdotool_environment is not None
+            else None
+        )
+        contact_sheet_environment = (
+            guac_minimal_environment(
+                ROOT, policy_name="guac-ssh-exec-contact-sheet-minimal"
+            )
+            if args.contact_sheet
+            else None
+        )
+        try:
+            execution_timeout = int(
+                configuration.get("GUAC_EXEC_TIMEOUT", "120") or "120"
+            )
+        except ValueError as exc:
+            raise EnvironmentPolicyError("GUAC_EXEC_TIMEOUT must be an integer") from exc
+        if execution_timeout <= 0 or execution_timeout > 3_600:
+            raise EnvironmentPolicyError("GUAC_EXEC_TIMEOUT must be between 1 and 3600")
+    except (EnvironmentPolicyError, ValueError, json.JSONDecodeError) as error:
+        ap.error(str(error))
+
+    try:
+        output.prepare()
+    except (GuacOutputPathError, OSError) as error:
+        ap.error(str(error))
+    marker = "__GUAC_DONE_" + stamp() + "__"
+    send_lines = []
+    if args.profile == "ssh-terminal":
+        send_lines.append("")
+        send_lines += commands
+        send_lines.append(f"echo {marker}")
+    else:
+        send_lines += commands
+    meta = {
+        "created_at": iso(),
+        "profile": args.profile,
+        "commands": commands,
+        "marker": marker,
+        "outdir": str(outdir),
+        "mode": "",
+    }
+    if contact_sheet_environment is not None:
+        meta["contact_sheet_environment"] = contact_sheet_environment.metadata()[
+            "environment"
+        ]
+    jwrite(output, "request.json", meta)
+    if args.dry_run:
+        output.write_text("typed.txt", "\n".join(send_lines) + "\n")
+        print(str(outdir))
+        return 0
+    store = EventStore(ROOT)
+    observed_generation = store.current_stop_generation()
+    if legacy_template:
+        output.write_text(
+            "ERROR.txt",
+            "Legacy GUAC_SSH_EXEC_COMMAND/GUAC_EXEC_COMMAND shell templates are disabled. Use GUAC_SSH_EXEC_ARGV.\n",
+        )
+        print(str(outdir / "ERROR.txt"), file=sys.stderr)
+        return 3
+    if argv_json:
+        assert command_argv is not None
+        assert command_environment is not None
+        cmd_blob = "\n".join(send_lines) + "\n"
+        output.write_text("commands.txt", cmd_blob)
+        argv = command_argv
+        with file_lock(ROOT / "state" / "mutation.lock"):
+            mutation_guard(store, observed_generation)
+            output.before_external_tool()
+            cp = run_bounded_argv(
+                argv,
+                cwd=ROOT,
+                timeout=execution_timeout,
+                max_output_bytes=args.max_output_bytes,
+                env=command_environment,
+            )
+        output.after_external_tool()
+        stdout = cp.stdout.decode("utf-8", errors="replace")
+        stderr = cp.stderr.decode("utf-8", errors="replace")
+        output.write_text("stdout.txt", stdout, errors="replace")
+        output.write_text("stderr.txt", stderr, errors="replace")
+        meta["mode"] = "command-argv"
+        meta["command_argv"] = argv
+        meta["returncode"] = cp.returncode
+        meta["termination"] = cp.termination
+        meta["environment"] = cp.environment
+        jwrite(output, "result.json", meta)
+        rc = cp.returncode if cp.termination == "exited" else 1
+    elif xdotool_path and xdotool_environment is not None:
+        typed = []
+        xdotool_result = None
+        with file_lock(ROOT / "state" / "mutation.lock"):
+            mutation_guard(store, observed_generation)
+            output.before_external_tool()
+            xdotool_result = run_bounded_argv(
+                [xdotool_path, "key", "Return"],
+                cwd=ROOT,
+                timeout=5,
+                max_output_bytes=64 * 1024,
+                env=xdotool_environment,
+            )
+            if xdotool_result.returncode == 0 and xdotool_result.termination == "exited":
+                time.sleep(args.delay)
+                for line in send_lines:
+                    xdotool_result = run_bounded_argv(
+                        [xdotool_path, "type", "--clearmodifiers", "--delay", "1", line],
+                        cwd=ROOT,
+                        timeout=30,
+                        max_output_bytes=64 * 1024,
+                        env=xdotool_environment,
+                    )
+                    if xdotool_result.returncode != 0 or xdotool_result.termination != "exited":
+                        break
+                    xdotool_result = run_bounded_argv(
+                        [xdotool_path, "key", "Return"],
+                        cwd=ROOT,
+                        timeout=5,
+                        max_output_bytes=64 * 1024,
+                        env=xdotool_environment,
+                    )
+                    if xdotool_result.returncode != 0 or xdotool_result.termination != "exited":
+                        break
+                    typed.append(line)
+                    time.sleep(args.delay)
+        output.after_external_tool()
+        output.write_text("typed.txt", "\n".join(typed) + "\n")
+        meta["mode"] = "xdotool-active-window"
+        meta["returncode"] = xdotool_result.returncode
+        meta["termination"] = xdotool_result.termination
+        meta["environment"] = xdotool_result.environment
+        jwrite(output, "result.json", meta)
+        rc = (
+            xdotool_result.returncode
+            if xdotool_result.termination == "exited"
+            else 1
+        )
+    else:
+        output.write_text(
+            "ERROR.txt",
+            "No GUAC_SSH_EXEC_ARGV/GUAC_EXEC_ARGV configured and xdotool not installed. Focus the SSH Guacamole terminal and use xdotool, or configure a custom sender.\n",
+        )
+        print(str(outdir / "ERROR.txt"), file=sys.stderr)
+        return 3
+    if args.contact_sheet:
+        assert contact_sheet_environment is not None
+        output.before_external_tool()
+        run_bounded_argv(
+            [
+                str(BIN_ROOT / "guac-contact-sheet"),
+                "--outdir",
+                str(output.child_directory("contact-sheet")),
+            ],
+            cwd=ROOT,
+            timeout=60,
+            max_output_bytes=64 * 1024,
+            env=contact_sheet_environment,
+        )
+        output.after_external_tool()
+    print(str(outdir))
+    return rc
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

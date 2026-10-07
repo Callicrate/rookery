@@ -1,0 +1,90 @@
+{
+  "agents": "agents.json",
+  "class": "ImmersiveAdapter",
+  "default_extensions": [
+    "guacamole"
+  ],
+  "docs": "README.md",
+  "env_example": "env.example",
+  "environment_schema": [
+    {
+      "name": "ADAPTER_CONFIG_INVENTORY_ARGV",
+      "target": "adapter.config.inventory_argv",
+      "type": "argv"
+    },
+    {
+      "name": "ADAPTER_CONFIG_SUBMIT_ARGV",
+      "target": "adapter.config.submit_argv",
+      "type": "argv"
+    },
+    {
+      "legacy_import": false,
+      "name": "ADAPTER_CONFIG_INVENTORY_ENV_KEYS",
+      "target": "adapter.config.inventory_env_keys",
+      "type": "environment_name_array"
+    },
+    {
+      "legacy_import": false,
+      "name": "ADAPTER_CONFIG_SUBMIT_ENV_KEYS",
+      "target": "adapter.config.submit_env_keys",
+      "type": "environment_name_array"
+    },
+    {
+      "legacy_import": false,
+      "name": "IMMERSIVE_SELECTED_LAB_REFRESH_ARGV",
+      "target": null,
+      "type": "argv"
+    },
+    {
+      "legacy_import": false,
+      "name": "IMMERSIVE_SELECTED_LAB_REFRESH_ENV_KEYS",
+      "target": null,
+      "type": "environment_name_array"
+    },
+    {
+      "legacy_import": false,
+      "name": "IMMERSIVE_GRAPHQL_URL",
+      "target": null,
+      "type": "https_url"
+    },
+    {
+      "legacy_import": false,
+      "name": "IMMERSIVE_SELECTED_LAB_QUERY",
+      "target": null,
+      "type": "string"
+    },
+    {
+      "legacy_import": false,
+      "name": "IMMERSIVE_ACTIONCABLE_URL",
+      "target": null,
+      "type": "string"
+    },
+    {
+      "legacy_import": false,
+      "name": "IMMERSIVE_ORIGIN",
+      "target": null,
+      "type": "https_origin"
+    },
+    {
+      "credential": true,
+      "legacy_import": false,
+      "name": "IMMERSIVE_COOKIES_FILE",
+      "target": null,
+      "type": "string"
+    },
+    {
+      "legacy_import": false,
+      "name": "IMMERSIVE_NETWORK_ENV_KEYS",
+      "target": null,
+      "type": "environment_name_array"
+    }
+  ],
+  "environment_requirements": {
+    "all": ["ADAPTER_CONFIG_INVENTORY_ARGV", "ADAPTER_CONFIG_SUBMIT_ARGV"]
+  },
+  "id": "immersive",
+  "module": "adapter.py",
+  "profile": "profile.json",
+  "schema_version": "1",
+  "tools": "tools.json"
+}

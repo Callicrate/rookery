@@ -1,0 +1,58 @@
+[
+  {
+    "admission": {
+      "capability_gap": "bounded guac console operator work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_guac_console_operator:one-owner-one-report-path",
+      "evidence": "Rookery optional role catalog entry at extensions/guacamole/agents/ctf_guac_console_operator.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_guac_console_operator",
+    "requires_all": [],
+    "requires_any": [
+      "guacamole",
+      "console"
+    ],
+    "source": "extensions/guacamole/agents/ctf_guac_console_operator.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded guac export operator work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_guac_export_operator:one-owner-one-report-path",
+      "evidence": "Rookery optional role catalog entry at extensions/guacamole/agents/ctf_guac_export_operator.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_guac_export_operator",
+    "requires_all": [],
+    "requires_any": [
+      "guacamole",
+      "console"
+    ],
+    "source": "extensions/guacamole/agents/ctf_guac_export_operator.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded console lease guardian work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_console_lease_guardian:one-owner-one-report-path",
+      "evidence": "Rookery optional role catalog entry at extensions/guacamole/agents/ctf_console_lease_guardian.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_console_lease_guardian",
+    "requires_all": [],
+    "requires_any": [
+      "guacamole",
+      "console"
+    ],
+    "source": "extensions/guacamole/agents/ctf_console_lease_guardian.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded terminal evidence exporter work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_terminal_evidence_exporter:one-owner-one-report-path",
+      "evidence": "Rookery optional role catalog entry at extensions/guacamole/agents/ctf_terminal_evidence_exporter.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_terminal_evidence_exporter",
+    "requires_all": [],
+    "requires_any": [
+      "guacamole",
+      "console"
+    ],
+    "source": "extensions/guacamole/agents/ctf_terminal_evidence_exporter.toml"
+  }
+]

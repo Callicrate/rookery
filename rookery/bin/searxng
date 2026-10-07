@@ -1,0 +1,280 @@
+#!/usr/bin/env -S python3 -I -B
+"""Query the configured SearXNG endpoint with explicit network authority."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import urllib.parse
+import urllib.request
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+LIB = ROOT / "lib"
+if str(LIB) not in sys.path:
+    sys.path.insert(0, str(LIB))
+
+from rookery.portable.environment import (  # noqa: E402
+    EnvClass,
+    EnvKey,
+    EnvSource,
+    EnvironmentPolicyError,
+    read_declared_environment,
+    searxng_network_environment,
+)
+from rookery.portable.network_policy import ExplicitNetworkPolicy  # noqa: E402
+from rookery.portable.scope import (  # noqa: E402
+    load_canonical_compiled_scope,
+    open_scoped_url,
+    verify_canonical_compiled_scope_binding,
+)
+
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+MAX_ENDPOINT_BYTES = 8 * 1024
+MAX_QUERY_BYTES = 8 * 1024
+MAX_PARAMETER_BYTES = 1024
+MAX_RESULT_FIELD_BYTES = 64 * 1024
+MAX_TOP_RESULTS = 50
+MAX_SCOPE_BYTES = 1024 * 1024
+NETWORK_TIMEOUT_SECONDS = 30
+
+_SEARXNG_CONTROLS = (
+    EnvKey("SEARXNG_MODE", EnvClass.ROOKERY_CONFIG),
+    EnvKey(
+        "SEARXNG_URL",
+        EnvClass.ROOKERY_CONFIG,
+        sources=(EnvSource.DOTENV, EnvSource.PREPARED, EnvSource.PARENT),
+    ),
+)
+
+
+class SearxngError(RuntimeError):
+    """A bounded, value-free SearXNG command failure."""
+
+
+class _Parser(argparse.ArgumentParser):
+    """Avoid echoing untrusted argument values in parser diagnostics."""
+
+    def error(self, message: str) -> None:
+        del message
+        self.exit(2, "SearXNG arguments are invalid\n")
+
+
+def _has_control_characters(value: str) -> bool:
+    return any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+
+
+def _require_bounded_text(value: object, *, maximum: int, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise SearxngError(f"SearXNG {label} is invalid")
+    if _has_control_characters(value) or len(value.encode("utf-8")) > maximum:
+        raise SearxngError(f"SearXNG {label} is invalid")
+    return value
+
+
+def _validated_endpoint(value: object) -> str:
+    endpoint = _require_bounded_text(value, maximum=MAX_ENDPOINT_BYTES, label="endpoint")
+    try:
+        parsed = urllib.parse.urlsplit(endpoint)
+        port = parsed.port
+    except ValueError as exc:
+        raise SearxngError("SearXNG endpoint is invalid") from exc
+    if (
+        parsed.scheme.casefold() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+        or (port is not None and not 1 <= port <= 65535)
+    ):
+        raise SearxngError("SearXNG endpoint is invalid")
+    return endpoint
+
+
+def _verify_binding(root: Path, binding):
+    """Re-admit a canonical scope/stop snapshot at the network boundary."""
+
+    return verify_canonical_compiled_scope_binding(
+        root,
+        scope_generation=binding.scope_generation,
+        stop_generation=binding.stop_generation,
+        file_sha256=binding.file_sha256,
+        content_sha256=binding.content_sha256,
+        launch_binding_sha256=binding.launch_binding_sha256,
+    )
+
+
+def _append_query(endpoint: str, parameters: Mapping[str, str]) -> str:
+    parsed = urllib.parse.urlsplit(endpoint)
+    query = urllib.parse.urlencode(parameters)
+    combined_query = f"{parsed.query}&{query}" if parsed.query else query
+    request_url = urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, combined_query, "")
+    )
+    return _require_bounded_text(
+        request_url, maximum=MAX_ENDPOINT_BYTES, label="request URL"
+    )
+
+
+def _bounded_result_value(value: object) -> str | None:
+    if value is None or not isinstance(value, str):
+        return None
+    encoded = value.encode("utf-8")
+    if len(encoded) <= MAX_RESULT_FIELD_BYTES:
+        return value
+    # Output is a convenience surface, not the unbounded raw response.  Keep a
+    # valid UTF-8 prefix without recording or decoding more than the response cap.
+    return encoded[:MAX_RESULT_FIELD_BYTES].decode("utf-8", errors="ignore")
+
+
+def _select_results(data: object, *, top: int, query: str) -> dict[str, object]:
+    if not isinstance(data, dict):
+        raise SearxngError("SearXNG response JSON is invalid")
+    raw_results = data.get("results", [])
+    if not isinstance(raw_results, list):
+        raise SearxngError("SearXNG response JSON is invalid")
+    results: list[dict[str, str | None]] = []
+    for item in raw_results:
+        if not isinstance(item, dict):
+            continue
+        results.append(
+            {
+                key: _bounded_result_value(item.get(key))
+                for key in ("title", "url", "content", "engine", "publishedDate")
+            }
+        )
+        if len(results) >= top:
+            break
+    response_query = _bounded_result_value(data.get("query")) or query
+    return {
+        "query": response_query,
+        "number_of_results": data.get("number_of_results"),
+        "results": results,
+    }
+
+
+def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
+    parser = _Parser(description="Query the configured Rookery SearXNG service")
+    parser.add_argument("query")
+    parser.add_argument("--top", type=int, default=5)
+    parser.add_argument("--categories", default="general")
+    parser.add_argument("--language", default="en-US")
+    parser.add_argument("--safesearch", default="0")
+    parser.add_argument("--pageno", default="1")
+    parser.add_argument("--time-range")
+    parser.add_argument("--max-response-bytes", type=int, default=MAX_RESPONSE_BYTES)
+    arguments = parser.parse_args(argv)
+    if not 1 <= arguments.top <= MAX_TOP_RESULTS:
+        raise SearxngError("SearXNG result count is outside the supported range")
+    if arguments.max_response_bytes <= 0:
+        raise SearxngError("SearXNG response byte limit is outside the supported range")
+    # A caller may request less data but cannot raise the process-wide response
+    # ceiling.  Preserve the established clamping contract so an oversized
+    # caller value still exercises the bounded read rather than becoming an
+    # unbounded transport request.
+    arguments.max_response_bytes = min(
+        arguments.max_response_bytes, MAX_RESPONSE_BYTES
+    )
+    arguments.query = _require_bounded_text(
+        arguments.query, maximum=MAX_QUERY_BYTES, label="query"
+    )
+    for name in ("categories", "language", "safesearch", "pageno"):
+        setattr(
+            arguments,
+            name,
+            _require_bounded_text(
+                getattr(arguments, name), maximum=MAX_PARAMETER_BYTES, label="parameter"
+            ),
+        )
+    if arguments.time_range is not None:
+        arguments.time_range = _require_bounded_text(
+            arguments.time_range, maximum=MAX_PARAMETER_BYTES, label="parameter"
+        )
+    return arguments
+
+
+def _network_policy(
+    root: Path, *, scope: Mapping[str, Any]
+) -> tuple[str, ExplicitNetworkPolicy]:
+    controls = read_declared_environment(
+        root, _SEARXNG_CONTROLS, include_prepared=True
+    )
+    mode = (controls.get("SEARXNG_MODE") or "auto").strip().casefold()
+    # Disabled mode still parses and classifies the selector, but selected
+    # values are not required because no action may use them.
+    child = searxng_network_environment(root, required=mode != "disabled")
+    if mode == "disabled":
+        raise SearxngError("SearXNG is disabled")
+    if mode != "auto":
+        raise SearxngError("SearXNG mode is invalid")
+    endpoint = _validated_endpoint(controls.get("SEARXNG_URL"))
+    return endpoint, ExplicitNetworkPolicy.from_child_environment(child, scope=scope)
+
+
+def query(root: Path, argv: Sequence[str] | None = None) -> dict[str, object]:
+    """Perform one scope-checked, response-bounded SearXNG query."""
+
+    arguments = _arguments(argv)
+    # Read the canonical scope before resolving a declared proxy.  A proxy is
+    # network authority in its own right and must be in this event's scope
+    # before an opener can exist.
+    binding = load_canonical_compiled_scope(root)
+    scope = binding.scope
+    endpoint, policy = _network_policy(root, scope=scope)
+    parameters = {
+        "q": arguments.query,
+        "format": "json",
+        "language": arguments.language,
+        "safesearch": arguments.safesearch,
+        "pageno": arguments.pageno,
+        "categories": arguments.categories,
+    }
+    if arguments.time_range:
+        parameters["time_range"] = arguments.time_range
+    request = urllib.request.Request(
+        _append_query(endpoint, parameters), headers={"Accept": "application/json"}
+    )
+    # Recheck the canonical file, manifest/SQLite generations, and stop
+    # generation immediately before the proxy/DNS/socket boundary.  The shared
+    # lock is released before I/O; it is never retained over this request.
+    binding = _verify_binding(root, binding)
+    scope = binding.scope
+    transport = policy.scoped_transport(scope)
+    # Proxy selection is a no-DNS, no-socket gate.  The endpoint-aware
+    # transport then resolves and pins exactly one authorized answer set while
+    # ``open_scoped_url`` reuses that transport for every redirect hop.
+    transport.preflight_url(request.full_url)
+    with open_scoped_url(
+        scope,
+        request,
+        timeout=NETWORK_TIMEOUT_SECONDS,
+        transport=transport,
+    ) as response:
+        raw = response.read(arguments.max_response_bytes + 1)
+    if len(raw) > arguments.max_response_bytes:
+        raise SearxngError("SearXNG response exceeds configured byte limit")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SearxngError("SearXNG response JSON is invalid") from exc
+    return _select_results(data, top=arguments.top, query=arguments.query)
+
+
+def main(argv: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
+    try:
+        result = query(root, argv)
+    except (EnvironmentPolicyError, OSError, RuntimeError, ValueError):
+        # Configuration, transport, scope, and JSON failures are intentionally
+        # indistinguishable to this public helper: diagnostics name no endpoint,
+        # proxy, CA path, selector value, response body, or credential.
+        print("SearXNG request could not be completed", file=sys.stderr)
+        return 2
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

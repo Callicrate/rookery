@@ -1,0 +1,283 @@
+#!/usr/bin/env -S python3 -I -B
+"""Export a remote log/file from Guacamole-style consoles with recorded fallbacks."""
+
+from __future__ import annotations
+import argparse
+import datetime as dt
+import importlib.util
+import json
+import os
+import hashlib
+import sys
+from pathlib import Path
+
+SOURCE_ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path.cwd()
+UTC = dt.timezone.utc
+sys.path.insert(0, str(SOURCE_ROOT / "lib"))
+EXTENSION_ROOT = Path(__file__).resolve().parents[1]
+
+from rookery.portable.adapters import (  # noqa: E402
+    render_argv_template,
+    run_bounded_argv,
+)
+from rookery.portable.control import mutation_guard  # noqa: E402
+from rookery.portable.environment import EnvironmentPolicyError  # noqa: E402
+from rookery.portable.optional_helper import require_bound_runtime_workspace  # noqa: E402
+from rookery.portable.store import EventStore  # noqa: E402
+from rookery.portable.util import file_lock  # noqa: E402
+
+
+def _load_extension_module(name: str):
+    """Load one colocated extension module without admitting it to sys.path."""
+
+    path = EXTENSION_ROOT / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"_rookery_guac_{name}", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("unable to load required Guacamole helper module")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_guac_environment = _load_extension_module("guac_environment")
+_guac_paths = _load_extension_module("guac_paths")
+guac_minimal_environment = _guac_environment.guac_minimal_environment
+read_guac_configuration = _guac_environment.read_guac_configuration
+transport_child_environment = _guac_environment.transport_child_environment
+GuacOutputPathError = _guac_paths.GuacOutputPathError
+resolve_guac_output = _guac_paths.resolve_guac_output
+
+DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024
+MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+MAX_TIMEOUT_SECONDS = 3_600
+
+
+def iso():
+    return dt.datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def stamp():
+    return dt.datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def run(argv, timeout, max_output_bytes, child_environment):
+    try:
+        return run_bounded_argv(
+            argv,
+            cwd=ROOT,
+            timeout=timeout,
+            max_output_bytes=max_output_bytes,
+            env=child_environment,
+        )
+    except Exception:
+
+        class R:
+            pass
+
+        r = R()
+        r.returncode = 999
+        r.stdout = b""
+        r.stderr = b"guacamole child launch failed"
+        r.termination = "error"
+        r.environment = child_environment.metadata()["environment"]
+        return r
+
+
+def sha(p):
+    h = hashlib.sha256()
+    try:
+        with open(p, "rb") as f:
+            for b in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(b)
+        return h.hexdigest()
+    except Exception:
+        return ""
+
+
+def main():
+    os.umask(0o077)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("remote_path")
+    ap.add_argument("--profile", default="ssh-terminal")
+    ap.add_argument("--target", default="")
+    ap.add_argument("--console", default="default")
+    ap.add_argument("--outdir", default="")
+    ap.add_argument("--timeout", type=int, default=180)
+    ap.add_argument(
+        "--max-output-bytes",
+        type=int,
+        default=DEFAULT_MAX_OUTPUT_BYTES,
+    )
+    args = ap.parse_args()
+    require_bound_runtime_workspace(ROOT)
+    if args.timeout <= 0 or args.timeout > MAX_TIMEOUT_SECONDS:
+        ap.error(f"--timeout must be between 1 and {MAX_TIMEOUT_SECONDS}")
+    if args.max_output_bytes <= 0 or args.max_output_bytes > MAX_OUTPUT_BYTES:
+        ap.error(f"--max-output-bytes must be between 1 and {MAX_OUTPUT_BYTES}")
+    try:
+        output = resolve_guac_output(
+            ROOT,
+            args.outdir or None,
+            default_parts=("remote-log-export", stamp()),
+        )
+    except GuacOutputPathError as error:
+        ap.error(str(error))
+    out = output.path
+    attempts = []
+    local = out / "exported.bin"
+    vals = {
+        "remote_path": args.remote_path,
+        "local_path": str(local),
+        "target": args.target,
+        "profile": args.profile,
+        "outdir": str(out),
+    }
+    try:
+        configuration = read_guac_configuration(ROOT)
+        transports = [
+            (
+                "guac-export-file",
+                [
+                    str(Path(__file__).resolve().parent / "guac-export-file"),
+                    args.remote_path,
+                    "--profile",
+                    args.profile,
+                    "--outdir",
+                    str(out / "guac-export-file"),
+                ],
+                guac_minimal_environment(
+                    ROOT, policy_name="guac-remote-log-export-helper-minimal"
+                ),
+            )
+        ]
+        for name, argv_control, keys_control in (
+            (
+                "clipboard",
+                "GUAC_CLIPBOARD_EXPORT_ARGV",
+                "GUAC_CLIPBOARD_EXPORT_ENV_KEYS",
+            ),
+            (
+                "base64",
+                "GUAC_BASE64_EXPORT_ARGV",
+                "GUAC_BASE64_EXPORT_ENV_KEYS",
+            ),
+            ("http", "GUAC_HTTP_EXPORT_ARGV", "GUAC_HTTP_EXPORT_ENV_KEYS"),
+        ):
+            raw_template = configuration.get(argv_control)
+            if not raw_template:
+                transports.append((name, None, None))
+                continue
+            transports.append(
+                (
+                    name,
+                    render_argv_template(
+                        json.loads(raw_template), vals, label=f"guacamole {name}"
+                    ),
+                    transport_child_environment(
+                        ROOT,
+                        configuration,
+                        policy_name=f"guac-{name}-transport",
+                        keys_control=keys_control,
+                    ),
+                )
+            )
+    except (EnvironmentPolicyError, ValueError, json.JSONDecodeError) as error:
+        ap.error(str(error))
+
+    try:
+        output.prepare()
+    except (GuacOutputPathError, OSError) as error:
+        ap.error(str(error))
+    legacy_keys = {
+        "clipboard": "GUAC_CLIPBOARD_EXPORT_COMMAND",
+        "base64": "GUAC_BASE64_EXPORT_COMMAND",
+        "http": "GUAC_HTTP_EXPORT_COMMAND",
+    }
+    success = False
+    store = EventStore(ROOT)
+    observed_generation = store.current_stop_generation()
+    for name, argv, child_environment in transports:
+        if not argv or child_environment is None:
+            attempts.append(
+                {
+                    "transport": name,
+                    "status": "legacy-shell-template-disabled"
+                    if configuration.get(legacy_keys.get(name, ""))
+                    else "not-configured",
+                }
+            )
+            continue
+        if name == "guac-export-file":
+            # The child helper owns the same stop/mutation lock.
+            try:
+                output.before_external_tool()
+            except (GuacOutputPathError, OSError) as error:
+                ap.error(str(error))
+            cp = run(argv, args.timeout, args.max_output_bytes, child_environment)
+        else:
+            with file_lock(ROOT / "state" / "mutation.lock"):
+                mutation_guard(store, observed_generation)
+                try:
+                    output.before_external_tool()
+                except (GuacOutputPathError, OSError) as error:
+                    ap.error(str(error))
+                cp = run(argv, args.timeout, args.max_output_bytes, child_environment)
+        try:
+            output.after_external_tool()
+        except (GuacOutputPathError, OSError) as error:
+            ap.error(str(error))
+        stdout = cp.stdout.decode("utf-8", errors="replace")
+        stderr = cp.stderr.decode("utf-8", errors="replace")
+        output.write_text(f"{name}.stdout.log", stdout, errors="replace")
+        output.write_text(f"{name}.stderr.log", stderr, errors="replace")
+        ok = (cp.returncode == 0 and cp.termination == "exited") and (
+            local.exists() or (out / "guac-export-file").exists()
+        )
+        attempts.append(
+            {
+                "transport": name,
+                "command_argv": argv,
+                "returncode": cp.returncode,
+                "termination": cp.termination,
+                "ok": ok,
+                "environment": cp.environment,
+            }
+        )
+        if ok:
+            success = True
+            break
+    if not success:
+        output.write_text(
+            "manual_transcript_template.md",
+            "# Manual Remote Log Transcript\n\nRemote path: `"
+            + args.remote_path.replace("`", "\\`")
+            + "`\nConsole: "
+            + args.console
+            + "\nCaptured at: "
+            + iso()
+            + "\n\n```text\n<paste byte-safe output or exact terminal text here>\n```\n",
+        )
+    manifest = {
+        "created_at": iso(),
+        "remote_path": args.remote_path,
+        "profile": args.profile,
+        "target": args.target,
+        "console": args.console,
+        "attempts": attempts,
+        "success": success,
+        "exported_path": str(local) if local.exists() else "",
+        "exported_sha256": sha(local) if local.exists() else "",
+    }
+    output.write_text(
+        "manifest.json",
+        json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+    )
+    print(f"evidence={out}")
+    print("success=" + str(success).lower())
+    return 0 if success else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

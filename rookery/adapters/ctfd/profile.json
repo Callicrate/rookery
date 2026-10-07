@@ -1,0 +1,49 @@
+{
+  "adapter": {
+    "config": {
+      "timeout": 30,
+      "token_env": "CTFD_TOKEN"
+    },
+    "id": "ctfd"
+  },
+  "capabilities": {
+    "optional": [
+      "release_changes",
+      "network",
+      "collaboration"
+    ],
+    "required": [
+      "local_shell",
+      "platform_inventory",
+      "challenge_details",
+      "scoring"
+    ]
+  },
+  "profile": "ctfd",
+  "release": {
+    "model": "poll",
+    "poll_seconds": 60
+  },
+  "session": {
+    "dynamic_attempts": false,
+    "lifecycle": "static-auth",
+    "required_freshness_seconds": 900
+  },
+  "scoring": {
+    "completion_mode": "scorer_truth",
+    "action_kinds": [
+      "flag",
+      "free_text",
+      "no_submit_evidence"
+    ]
+  },
+  "surface": {
+    "bundles": [
+      "core",
+      "research",
+      "scoring-review",
+      "writeups",
+      "unstick"
+    ]
+  }
+}

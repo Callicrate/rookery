@@ -1,0 +1,14 @@
+{
+    "class": "FixtureAdapter",
+    "id": "fixture",
+    "environment_schema": [
+        {
+            "name": "ADAPTER_CONFIG_BASE_URL",
+            "target": "adapter.config.base_url",
+            "type": "https_origin"
+        }
+    ],
+    "module": "adapter.py",
+    "profile": "profile.json",
+    "schema_version": "1"
+}

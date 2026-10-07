@@ -1,0 +1,66 @@
+#!/usr/bin/env -S python3 -I -B
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+SOURCE_ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path.cwd()
+sys.path.insert(0, str(SOURCE_ROOT / "lib"))
+
+from rookery.portable.environment import minimal_child_environment  # noqa: E402
+from rookery.portable.optional_helper import require_bound_runtime_workspace  # noqa: E402
+from rookery.portable.store import EventStore  # noqa: E402
+
+
+def _call_rookery(command: list[str]) -> int:
+    """Delegate with only the fixed runtime environment, never the reviewer's shell."""
+
+    child_environment = minimal_child_environment(
+        ROOT, policy_name="koth-review-minimal"
+    )
+    return subprocess.call(command, cwd=ROOT, env=child_environment.values)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Review canonical KOTH handle-write proposals without granting or executing authority."
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("status")
+    review = subparsers.add_parser("review")
+    review.add_argument("proposal_id")
+    review.add_argument("verdict", choices=["approved", "hold", "rejected", "needs_verifier"])
+    review.add_argument("--reviewer", required=True)
+    review.add_argument("--reason", required=True)
+    review.add_argument("--verifier-report", default="")
+    args = parser.parse_args()
+    require_bound_runtime_workspace(ROOT)
+
+    if args.command == "status":
+        return _call_rookery([str(SOURCE_ROOT / "bin" / "rookery"), "score", "status"])
+
+    proposal = EventStore(ROOT).rebuild()["current"]["proposals"].get(args.proposal_id, {})
+    if proposal.get("action_kind") != "handle_write":
+        print("proposal is not a canonical handle_write action", file=sys.stderr)
+        return 2
+    command = [
+        str(SOURCE_ROOT / "bin" / "rookery"),
+        "score",
+        "review",
+        args.proposal_id,
+        args.verdict,
+        "--reviewer",
+        args.reviewer,
+        "--reason",
+        args.reason,
+    ]
+    if args.verifier_report:
+        command.extend(["--verifier-report", args.verifier_report])
+    return _call_rookery(command)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

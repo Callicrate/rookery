@@ -1,0 +1,48 @@
+{
+  "adapter": {
+    "config": {
+      "max_response_bytes": 262144,
+      "session_lease_seconds": 60,
+      "timeout": 45
+    },
+    "id": "skillbit"
+  },
+  "capabilities": {
+    "optional": [
+      "network",
+      "collaboration"
+    ],
+    "required": [
+      "local_shell",
+      "browser_cdp",
+      "browser_gateway",
+      "session",
+      "platform_inventory",
+      "challenge_details",
+      "scoring"
+    ]
+  },
+  "profile": "skillbit",
+  "scoring": {
+    "action_kinds": [
+      "flag",
+      "free_text",
+      "no_submit_evidence"
+    ],
+    "completion_mode": "scorer_truth"
+  },
+  "session": {
+    "dynamic_attempts": false,
+    "lifecycle": "browser-session",
+    "required_freshness_seconds": 900
+  },
+  "surface": {
+    "bundles": [
+      "core",
+      "research",
+      "scoring-review",
+      "writeups",
+      "unstick"
+    ]
+  }
+}

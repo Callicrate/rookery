@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+CANONICAL="$ROOT/rookery"
+
+if [[ -L "$CANONICAL" || ! -d "$CANONICAL" || ! -x "$CANONICAL/bin/rookery" ]]; then
+  echo "canonical Rookery source is unavailable" >&2
+  exit 2
+fi
+if ! python3 -I -S -B "$CANONICAL/bin/validate_rookery.py" --release --source-checkout >/dev/null; then
+  echo "canonical Rookery source failed strict validation" >&2
+  exit 2
+fi
+
+cd "$CANONICAL"
+exec "$CANONICAL/bin/rookery" "$@"

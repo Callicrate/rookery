@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Retired: curl cannot enforce the event scope across redirects, proxies,
+# resolver overrides, configuration files, or every TLS/network option.
+# Keep only introspection so an old direct invocation fails before it can
+# touch scope state, a network transport, or an output path.
+if [ $# -eq 1 ]; then
+  case "$1" in
+    -h|--help)
+      printf '%s\n' 'usage: webq [--help|--version]'
+      printf '%s\n' 'webq is retired; use a selected adapter attachment path instead.'
+      exit 0
+      ;;
+    --version)
+      printf '%s\n' 'webq retired (network transport disabled)'
+      exit 0
+      ;;
+  esac
+fi
+
+printf '%s\n' 'web_network_scope_unenforced: webq cannot perform network requests' >&2
+exit 2

@@ -1,0 +1,96 @@
+#!/usr/bin/env -S python3 -I -B
+"""Preflight dynamic-attempt scope before any reviewer-owned submission."""
+
+from __future__ import annotations
+import argparse
+import json
+from pathlib import Path
+
+ROOT = Path.cwd()
+
+
+def jread(p, default):
+    try:
+        return json.loads(Path(p).read_text(errors="replace"))
+    except Exception:
+        return default
+
+
+def load_proposal(path):
+    if not path:
+        return {}
+    return jread(path, {})
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Compare candidate/proposal attempt IDs with current active attempt state."
+    )
+    ap.add_argument("--challenge", required=True)
+    ap.add_argument("--proposal", default="")
+    ap.add_argument("--activity-id", default="")
+    ap.add_argument("--attempt-id", default="")
+    ap.add_argument("--cluster-id", default="")
+    ap.add_argument("--question-id", default="")
+    ap.add_argument("--strict", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+    cur = (
+        jread(ROOT / "state/attempts/current.json", {}).get("by_challenge") or {}
+    ).get(str(args.challenge), {})
+    prop = load_proposal(args.proposal)
+    wanted = {
+        "activity_id": args.activity_id
+        or prop.get("activity_id")
+        or prop.get("activity-id")
+        or "",
+        "attempt_id": args.attempt_id
+        or prop.get("attempt_id")
+        or prop.get("attempt-id")
+        or "",
+        "cluster_id": args.cluster_id
+        or prop.get("cluster_id")
+        or prop.get("cluster-id")
+        or "",
+        "question_id": args.question_id
+        or prop.get("question_id")
+        or prop.get("question-id")
+        or "",
+    }
+    mism = []
+    missing = []
+    for k, v in wanted.items():
+        if v and str(cur.get(k, "")) != str(v):
+            mism.append({"field": k, "candidate": v, "current": cur.get(k, "")})
+        if not v and cur.get(k):
+            missing.append(k)
+    ok = not mism and (not args.strict or (bool(cur) and not missing))
+    rec = {
+        "ok": ok,
+        "challenge": args.challenge,
+        "current": cur,
+        "candidate_scope": wanted,
+        "mismatches": mism,
+        "missing_candidate_fields": missing,
+        "proposal": args.proposal,
+    }
+    if args.json:
+        print(json.dumps(rec, indent=2, ensure_ascii=False))
+    else:
+        print(f"attempt_scope_ok={ok} challenge={args.challenge}")
+        if not cur:
+            print("warning: no current attempt registry entry for challenge")
+        for m in mism:
+            print(
+                f"mismatch {m['field']}: candidate={m['candidate']} current={m['current']}"
+            )
+        if args.strict and missing:
+            print(
+                "missing candidate fields required by current attempt: "
+                + ", ".join(missing)
+            )
+    return 0 if ok else 4
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,118 @@
+{
+  "agents": "agents.json",
+  "class": "CTFdBrowserAdapter",
+  "docs": "README.md",
+  "env_example": "env.example",
+  "environment_requirements": {
+    "all": [
+      "ADAPTER_CONFIG_SCORING_MODE",
+      "ADAPTER_CONFIG_EXPECTED_ACCOUNT_ID",
+      "BROWSER_MODE"
+    ],
+    "any": [
+      [
+        "CTFD_URL",
+        "ADAPTER_CONFIG_BASE_URL"
+      ]
+    ],
+    "same": [["CTFD_URL", "ADAPTER_CONFIG_BASE_URL"]],
+    "allowed": [{"name": "BROWSER_MODE", "values": ["cdp", "bidi"]}],
+    "conditional": [
+      {
+        "when": "BROWSER_MODE",
+        "equals": "cdp",
+        "require": "BROWSER_CDP_URL"
+      },
+      {
+        "when": "BROWSER_MODE",
+        "equals": "bidi",
+        "require": "BROWSER_BIDI_URL"
+      },
+      {
+        "when": "ADAPTER_CONFIG_SCORING_MODE",
+        "equals": "team",
+        "require": "ADAPTER_CONFIG_EXPECTED_TEAM_ID"
+      }
+    ]
+  },
+  "environment_schema": [
+    {
+      "name": "CTFD_URL",
+      "target": null,
+      "type": "https_origin"
+    },
+    {
+      "credential": true,
+      "legacy_import": false,
+      "name": "CTFD_TOKEN",
+      "target": null,
+      "type": "string"
+    },
+    {
+      "name": "ADAPTER_CONFIG_BASE_URL",
+      "target": "adapter.config.base_url",
+      "type": "https_origin"
+    },
+    {
+      "choices": [
+        "user",
+        "team"
+      ],
+      "name": "ADAPTER_CONFIG_SCORING_MODE",
+      "target": "adapter.config.scoring_mode",
+      "type": "enum"
+    },
+    {
+      "name": "ADAPTER_CONFIG_EXPECTED_ACCOUNT_ID",
+      "target": "adapter.config.expected_account_id",
+      "type": "identifier"
+    },
+    {
+      "name": "ADAPTER_CONFIG_EXPECTED_TEAM_ID",
+      "target": "adapter.config.expected_team_id",
+      "type": "identifier"
+    },
+    {
+      "name": "ADAPTER_CONFIG_TARGET_ID",
+      "target": "adapter.config.target_id",
+      "type": "identifier"
+    },
+    {
+      "name": "ADAPTER_CONFIG_CSRF_PAGE_PATH",
+      "target": "adapter.config.csrf_page_path",
+      "type": "absolute_path"
+    },
+    {
+      "maximum": 300,
+      "minimum": 1,
+      "name": "ADAPTER_CONFIG_SESSION_LEASE_SECONDS",
+      "target": "adapter.config.session_lease_seconds",
+      "type": "integer"
+    },
+    {
+      "maximum": 120,
+      "minimum": 1,
+      "name": "ADAPTER_CONFIG_TIMEOUT",
+      "target": "adapter.config.timeout",
+      "type": "integer"
+    },
+    {
+      "maximum": 16777216,
+      "minimum": 1024,
+      "name": "ADAPTER_CONFIG_MAX_RESPONSE_BYTES",
+      "target": "adapter.config.max_response_bytes",
+      "type": "integer"
+    },
+    {
+      "name": "ADAPTER_CONFIG_SEQUENTIAL_UNLOCK",
+      "target": "adapter.config.sequential_unlock",
+      "type": "bool01"
+    }
+  ],
+  "id": "ctfd_browser",
+  "platform_origin_environment": ["ADAPTER_CONFIG_BASE_URL", "CTFD_URL"],
+  "module": "adapter.py",
+  "profile": "profile.json",
+  "schema_version": "1",
+  "tools": "tools.json"
+}

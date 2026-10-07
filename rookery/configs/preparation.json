@@ -1,0 +1,48 @@
+{
+  "schema_version": "1",
+  "binaries": [
+    {"id":"bash","commands":["bash"],"required":true,"install_class":"core","packages":{"apt":["bash"],"dnf":["bash"]}},
+    {"id":"python3","commands":["python3"],"minimum_python_version":[3,11],"required":true,"install_class":"core","packages":{"apt":["python3"],"dnf":["python3"]}},
+    {"id":"curl","commands":["curl"],"required":true,"install_class":"core","packages":{"apt":["curl"],"dnf":["curl"]}},
+    {"id":"git","commands":["git"],"required":true,"install_class":"core","packages":{"apt":["git"],"dnf":["git"]}},
+    {"id":"jq","commands":["jq"],"required":true,"install_class":"core","packages":{"apt":["jq"],"dnf":["jq"]}},
+    {"id":"ripgrep","commands":["rg"],"required":true,"install_class":"core","packages":{"apt":["ripgrep"],"dnf":["ripgrep"]}},
+    {"id":"file","commands":["file"],"required":true,"install_class":"core","packages":{"apt":["file"],"dnf":["file"]}},
+    {"id":"binutils","commands":["strings","objdump","readelf"],"required":true,"install_class":"core","packages":{"apt":["binutils"],"dnf":["binutils"]}},
+    {"id":"xxd","commands":["xxd"],"required":true,"install_class":"core","packages":{"apt":["xxd"],"dnf":["vim-common"]}},
+    {"id":"archive-core","commands":["tar","gzip","unzip"],"required":true,"install_class":"core","packages":{"apt":["tar","gzip","unzip"],"dnf":["tar","gzip","unzip"]}},
+    {"id":"nmap","commands":["nmap"],"required":false,"install_class":"recommended","packages":{"apt":["nmap"],"dnf":["nmap"]}},
+    {"id":"netcat","commands":["nc"],"required":false,"install_class":"recommended","packages":{"apt":["netcat-openbsd"],"dnf":["nmap-ncat"]}},
+    {"id":"socat","commands":["socat"],"required":false,"install_class":"recommended","packages":{"apt":["socat"],"dnf":["socat"]}},
+    {"id":"gdb","commands":["gdb"],"required":false,"install_class":"recommended","packages":{"apt":["gdb"],"dnf":["gdb"]}},
+    {"id":"radare2","commands":["r2"],"required":false,"install_class":"recommended","packages":{"apt":["radare2"],"dnf":["radare2"]}},
+    {"id":"openssl","commands":["openssl"],"required":false,"install_class":"recommended","packages":{"apt":["openssl"],"dnf":["openssl"]}},
+    {"id":"7zip","commands":["7z"],"required":false,"install_class":"recommended","packages":{"apt":["p7zip-full"],"dnf":["p7zip","p7zip-plugins"]}},
+    {"id":"tmux","commands":["tmux"],"required":false,"install_class":"recommended","packages":{"apt":["tmux"],"dnf":["tmux"]}},
+    {"id":"python-venv","commands":["python3"],"required":false,"install_class":"recommended","packages":{"apt":["python3-venv","python3-pip"],"dnf":["python3-pip"]}},
+    {"id":"john","commands":["john"],"required":false,"install_class":"heavy","packages":{"apt":["john"],"dnf":["john"]}},
+    {"id":"hashcat","commands":["hashcat"],"required":false,"install_class":"heavy","packages":{"apt":["hashcat"],"dnf":["hashcat"]}},
+    {"id":"tshark","commands":["tshark"],"required":false,"install_class":"heavy","packages":{"apt":["tshark"],"dnf":["wireshark-cli"]}},
+    {"id":"exiftool","commands":["exiftool"],"required":false,"install_class":"heavy","packages":{"apt":["libimage-exiftool-perl"],"dnf":["perl-Image-ExifTool"]}},
+    {"id":"binwalk","commands":["binwalk"],"required":false,"install_class":"heavy","packages":{"apt":["binwalk"],"dnf":["binwalk"]}},
+    {"id":"ffuf","commands":["ffuf"],"required":false,"install_class":"heavy","packages":{"apt":["ffuf"],"dnf":["ffuf"]}}
+  ],
+  "data_files": [
+    {
+      "id":"rockyou",
+      "env":"ROCKYOU_PATH",
+      "required":false,
+      "install_class":"recommended",
+      "candidates":["/usr/share/wordlists/rockyou.txt","/usr/share/wordlists/rockyou.txt.gz","/usr/share/seclists/Passwords/Leaked-Databases/rockyou.txt.tar.gz"],
+      "packages":{"apt":["wordlists"]}
+    },
+    {
+      "id":"seclists",
+      "env":"SECLISTS_PATH",
+      "required":false,
+      "install_class":"heavy",
+      "candidates":["/usr/share/seclists","/opt/SecLists"],
+      "packages":{"apt":["seclists"]}
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")" && pwd)
+cd "$ROOT"
+case "${1:-}" in
+  "")
+    if "$ROOT/bin/rookery" go; then
+      :
+    else
+      exit $?
+    fi
+    if [[ ! -s "$ROOT/START_PROMPT.md" ]]; then
+      echo "rookery launch completed without START_PROMPT.md" >&2
+      exit 2
+    fi
+    attempt_file="$ROOT/state/launch_attempt.json"
+    if [[ ! -f "$attempt_file" || -L "$attempt_file" ]]; then
+      echo "rookery launch completed without a safe launch attempt" >&2
+      exit 2
+    fi
+    attempt_id=$(LC_ALL=C sed -n 's/^[[:space:]]*"attempt_id": "\([0-9a-f]\{64\}\)",[[:space:]]*$/\1/p' "$attempt_file")
+    if [[ ! "$attempt_id" =~ ^[0-9a-f]{64}$ ]]; then
+      echo "rookery launch attempt is malformed" >&2
+      exit 2
+    fi
+    start_prompt=$(<"$ROOT/START_PROMPT.md")
+    exec "$ROOT/run-codex" --rookery-launch-attempt "$attempt_id" "$start_prompt"
+    ;;
+  status) shift; exec "$ROOT/bin/rookery" go status "$@" ;;
+  stop) shift; exec "$ROOT/bin/rookery" go stop "$@" ;;
+  *) echo "usage: ./go [status|stop]" >&2; exit 2 ;;
+esac

@@ -1,0 +1,1 @@
+{"challenges": [{"id": "301", "name": "Optional HTB Fixture", "category": "pwn", "points": 300, "solved": false}], "verdicts": {"301:HTB{accepted}": {"correct": true}, "default": {"correct": false}}}

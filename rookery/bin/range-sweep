@@ -1,0 +1,518 @@
+#!/usr/bin/env -S python3 -I -B
+"""Run one explicitly scoped, TCP-only nmap discovery plan."""
+
+from __future__ import annotations
+
+import hashlib
+import ipaddress
+import json
+import os
+import secrets
+import stat
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from pathlib import PurePosixPath
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "lib") not in sys.path:
+    sys.path.insert(0, str(ROOT / "lib"))
+
+from rookery.portable.adapters import run_bounded_argv  # noqa: E402
+from rookery.portable.environment import minimal_child_environment  # noqa: E402
+from rookery.portable.scope import (  # noqa: E402
+    CompiledScopeBinding,
+    check_cidr,
+    load_canonical_compiled_scope,
+)
+from rookery.portable.util import (  # noqa: E402
+    compact_now,
+    path_component_id,
+)
+
+MAX_OUTPUT_ATTEMPTS = 32
+OUTPUT_MARKER = ".rookery-range-sweep"
+OUTPUT_FILES = ("scan.nmap",)
+NMAP_TIMEOUT_SECONDS = 900
+NMAP_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+
+
+def _canonical_cidr(value: str) -> str:
+    if not isinstance(value, str) or not value or value.startswith("-"):
+        raise ValueError("range-sweep CIDR is invalid")
+    try:
+        network = ipaddress.ip_network(value, strict=False)
+    except ValueError as exc:
+        raise ValueError("range-sweep CIDR is invalid") from exc
+    canonical = network.with_prefixlen
+    if value != canonical:
+        raise ValueError("range-sweep CIDR must use canonical network notation")
+    return canonical
+
+
+def _tcp_ports(scope: dict[str, object]) -> tuple[int, ...]:
+    protocols = scope.get("allowed_protocols")
+    if not isinstance(protocols, list) or "tcp" not in {
+        value.casefold() for value in protocols if isinstance(value, str)
+    }:
+        raise ValueError("compiled scope has no explicit TCP authority")
+    ports = scope.get("allowed_ports")
+    if not isinstance(ports, list) or not ports:
+        raise ValueError("compiled scope has no explicit TCP port set")
+    result: set[int] = set()
+    for value in ports:
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535:
+            raise ValueError("compiled scope has an invalid TCP port set")
+        result.add(value)
+    if not result:
+        raise ValueError("compiled scope has no explicit TCP port set")
+    return tuple(sorted(result))
+
+
+@dataclass
+class _RangeOutput:
+    path: Path
+    root_descriptor: int
+    research_descriptor: int
+    family_descriptor: int
+    output_descriptor: int
+    root_identity: tuple[int, int]
+    research_identity: tuple[int, int]
+    family_identity: tuple[int, int]
+    output_identity: tuple[int, int]
+    output_name: str
+
+    def close(self) -> None:
+        for name in (
+            "output_descriptor",
+            "family_descriptor",
+            "research_descriptor",
+            "root_descriptor",
+        ):
+            descriptor = getattr(self, name)
+            if descriptor >= 0:
+                os.close(descriptor)
+                setattr(self, name, -1)
+
+
+def _directory_identity(info: os.stat_result) -> tuple[int, int]:
+    if not stat.S_ISDIR(info.st_mode):
+        raise OSError("range output ancestry is not a directory")
+    return int(info.st_dev), int(info.st_ino)
+
+
+def _directory_flags() -> int:
+    return (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+
+
+def _open_current_directory(path: Path) -> tuple[int, tuple[int, int]]:
+    initial = os.lstat(path)
+    descriptor = os.open(path, _directory_flags())
+    try:
+        identity = _directory_identity(os.fstat(descriptor))
+        if identity != _directory_identity(initial):
+            raise OSError("range output ancestry changed")
+        return descriptor, identity
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _open_or_create_child_directory(
+    parent_descriptor: int, name: str
+) -> tuple[int, tuple[int, int]]:
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent_descriptor)
+    except FileExistsError:
+        pass
+    descriptor = os.open(name, _directory_flags(), dir_fd=parent_descriptor)
+    try:
+        identity = _directory_identity(os.fstat(descriptor))
+        os.fchmod(descriptor, 0o700)
+        return descriptor, identity
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _open_checked_child_directory(
+    parent_descriptor: int, name: str, expected: tuple[int, int]
+) -> int:
+    info = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    if _directory_identity(info) != expected:
+        raise OSError("range output ancestry detached")
+    descriptor = os.open(name, _directory_flags(), dir_fd=parent_descriptor)
+    try:
+        if _directory_identity(os.fstat(descriptor)) != expected:
+            raise OSError("range output ancestry detached")
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _write_new_output_file(descriptor: int, name: str, data: bytes) -> tuple[int, int]:
+    target = os.open(
+        name,
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+        dir_fd=descriptor,
+    )
+    try:
+        os.fchmod(target, 0o600)
+        written = 0
+        while written < len(data):
+            count = os.write(target, data[written:])
+            if count <= 0:
+                raise OSError("range output write failed")
+            written += count
+        os.fsync(target)
+        info = os.fstat(target)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size != len(data):
+            raise OSError("range output publication changed")
+        return int(info.st_dev), int(info.st_ino)
+    finally:
+        os.close(target)
+
+
+def _create_output_directory(root: Path) -> _RangeOutput:
+    """Create one marker-owned, no-clobber private result directory."""
+
+    root_descriptor, root_identity = _open_current_directory(root)
+    research_descriptor: int | None = None
+    family_descriptor: int | None = None
+    for _ in range(MAX_OUTPUT_ATTEMPTS):
+        try:
+            if research_descriptor is None:
+                research_descriptor, research_identity = _open_or_create_child_directory(
+                    root_descriptor, "research"
+                )
+                family_descriptor, family_identity = _open_or_create_child_directory(
+                    research_descriptor, "range-sweep"
+                )
+            component = path_component_id(
+                f"scan-{compact_now().lower()}-{secrets.token_hex(12)}",
+                label="range-sweep output",
+            )
+            os.mkdir(component, 0o700, dir_fd=family_descriptor)
+        except FileExistsError:
+            continue
+        except Exception:
+            for ancestor in (family_descriptor, research_descriptor, root_descriptor):
+                if ancestor is not None:
+                    os.close(ancestor)
+            raise
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                component, _directory_flags(), dir_fd=family_descriptor
+            )
+            output_identity = _directory_identity(os.fstat(descriptor))
+            os.fchmod(descriptor, 0o700)
+            _write_new_output_file(
+                descriptor, OUTPUT_MARKER, b"rookery range-sweep output\n"
+            )
+            return _RangeOutput(
+                root / "research" / "range-sweep" / component,
+                root_descriptor,
+                research_descriptor,
+                family_descriptor,
+                descriptor,
+                root_identity,
+                research_identity,
+                family_identity,
+                output_identity,
+                component,
+            )
+        except Exception:
+            if descriptor is not None:
+                os.close(descriptor)
+            for ancestor in (family_descriptor, research_descriptor, root_descriptor):
+                if ancestor is not None:
+                    os.close(ancestor)
+            raise
+    for descriptor in (family_descriptor, research_descriptor, root_descriptor):
+        if descriptor is not None:
+            os.close(descriptor)
+    raise RuntimeError("could not reserve a unique range-sweep output directory")
+
+
+def _verify_output_ancestry(output: _RangeOutput) -> int:
+    """Rewalk canonical ancestry and refuse an observed detached output."""
+
+    root_descriptor = research_descriptor = family_descriptor = output_descriptor = -1
+    try:
+        root_descriptor, identity = _open_current_directory(output.path.parents[2])
+        if identity != output.root_identity:
+            raise OSError("range output ancestry detached")
+        research_descriptor = _open_checked_child_directory(
+            root_descriptor, "research", output.research_identity
+        )
+        family_descriptor = _open_checked_child_directory(
+            research_descriptor, "range-sweep", output.family_identity
+        )
+        output_descriptor = _open_checked_child_directory(
+            family_descriptor, output.output_name, output.output_identity
+        )
+        return output_descriptor
+    except Exception:
+        if output_descriptor >= 0:
+            os.close(output_descriptor)
+        raise
+    finally:
+        for descriptor in (family_descriptor, research_descriptor, root_descriptor):
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
+def _publish_output_file(output: _RangeOutput, name: str, data: bytes) -> None:
+    """Stage bytes, revalidate ancestry, then link a no-clobber final name.
+
+    The final rewalk closes every observed pre-publication detachment.  A
+    same-UID actor can still move a successfully linked file after publication;
+    that post-publication filesystem authority is intentionally not claimed as
+    containment by this helper.
+    """
+
+    temporary = path_component_id(
+        f"stage-{name}-{secrets.token_hex(12)}.tmp", label="range output staging"
+    )
+    temporary_identity = _write_new_output_file(
+        output.output_descriptor, temporary, data
+    )
+    verified_output = -1
+    try:
+        verified_output = _verify_output_ancestry(output)
+        os.link(
+            temporary,
+            name,
+            src_dir_fd=output.output_descriptor,
+            dst_dir_fd=verified_output,
+            follow_symlinks=False,
+        )
+        final = os.stat(name, dir_fd=verified_output, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(final.st_mode)
+            or (int(final.st_dev), int(final.st_ino)) != temporary_identity
+            or final.st_nlink != 2
+        ):
+            raise OSError("range output publication changed")
+        os.unlink(temporary, dir_fd=output.output_descriptor)
+        final = os.stat(name, dir_fd=verified_output, follow_symlinks=False)
+        if (
+            (int(final.st_dev), int(final.st_ino)) != temporary_identity
+            or final.st_nlink != 1
+        ):
+            raise OSError("range output publication changed")
+    finally:
+        if verified_output >= 0:
+            os.close(verified_output)
+        try:
+            os.unlink(temporary, dir_fd=output.output_descriptor)
+        except FileNotFoundError:
+            pass
+
+
+def _nmap_plan(cidr: str, scope: dict[str, object]) -> list[str]:
+    decision = check_cidr(scope, cidr)
+    if not decision.allowed:
+        raise ValueError("range-sweep CIDR is outside declared scope")
+    ports = _tcp_ports(scope)
+    return [
+        "nmap",
+        "-n",
+        "-Pn",
+        "-sT",
+        "-p",
+        ",".join(str(port) for port in ports),
+        "-oN",
+        "-",
+        "--",
+        cidr,
+    ]
+
+
+def _read_runq_capture(root: Path, result: Any) -> bytes:
+    """Import runq's retained stdout only through a verified descriptor."""
+
+    try:
+        meta = json.loads(result.stdout.decode("utf-8"))
+        relative = str(meta["stdout_path"])
+        expected_bytes = int(meta["stdout_bytes"])
+        expected_sha256 = str(meta["stdout_sha256"])
+    except (AttributeError, UnicodeDecodeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise RuntimeError("range-sweep command capture is invalid") from exc
+    path_value = PurePosixPath(relative)
+    if (
+        not relative
+        or "\\" in relative
+        or path_value.is_absolute()
+        or any(part in {"", ".", ".."} for part in path_value.parts)
+        or path_value.parts[:2] != ("logs", "commands")
+        or expected_bytes < 0
+        or expected_bytes > NMAP_MAX_OUTPUT_BYTES
+        or len(expected_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expected_sha256)
+    ):
+        raise RuntimeError("range-sweep command capture is invalid")
+    candidate = root.joinpath(*path_value.parts)
+    try:
+        candidate.relative_to(root / "logs" / "commands")
+        initial = os.lstat(candidate)
+        if (
+            not stat.S_ISREG(initial.st_mode)
+            or initial.st_nlink != 1
+            or initial.st_size != expected_bytes
+        ):
+            raise OSError("capture is not a retained regular file")
+        descriptor = os.open(
+            candidate,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("range-sweep command capture is invalid") from exc
+    try:
+        before = os.fstat(descriptor)
+        signature = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+            before.st_nlink,
+        )
+        if signature != (
+            initial.st_dev,
+            initial.st_ino,
+            initial.st_size,
+            initial.st_mtime_ns,
+            initial.st_ctime_ns,
+            initial.st_nlink,
+        ):
+            raise RuntimeError("range-sweep command capture is invalid")
+        data = bytearray()
+        while len(data) <= expected_bytes:
+            chunk = os.read(descriptor, min(64 * 1024, expected_bytes + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        after = os.fstat(descriptor)
+        if (
+            len(data) != expected_bytes
+            or signature
+            != (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+                after.st_nlink,
+            )
+            or hashlib.sha256(data).hexdigest() != expected_sha256
+        ):
+            raise RuntimeError("range-sweep command capture is invalid")
+        return bytes(data)
+    finally:
+        os.close(descriptor)
+
+
+def main(argv: list[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments == ["--help"]:
+        print("usage: range-sweep <canonical-cidr>")
+        print("runs only compiled-scope TCP ports; no nmap options are accepted")
+        return 0
+    if arguments == ["--version"]:
+        print("range-sweep 1")
+        return 0
+    os.umask(0o077)
+    if len(arguments) != 1:
+        print("usage: range-sweep <cidr>", file=sys.stderr)
+        return 2
+    output: _RangeOutput | None = None
+    try:
+        cidr = _canonical_cidr(arguments[0])
+        binding: CompiledScopeBinding = load_canonical_compiled_scope(ROOT)
+        scope = binding.scope
+        # The child receives no Rookery evidence path: nmap writes normal
+        # output to runq's private capture, then this process imports it after
+        # descriptor-level verification and no-clobber publication.
+        _tcp_ports(scope)
+        decision = check_cidr(scope, cidr)
+        if not decision.allowed:
+            raise ValueError("range-sweep CIDR is outside declared scope")
+        # Admit and retain the final output directory before creating runq
+        # command evidence or spawning nmap.  The child still receives no path
+        # inside it, and later publication uses this held descriptor.
+        output = _create_output_directory(ROOT)
+        plan = _nmap_plan(cidr, scope)
+        result = run_bounded_argv(
+            [
+                str(ROOT / "bin" / "runq"),
+                "-t",
+                str(NMAP_TIMEOUT_SECONDS),
+                "-l",
+                "range-sweep",
+                "--scope-generation",
+                str(binding.scope_generation),
+                "--stop-generation",
+                str(binding.stop_generation),
+                "--scope-file-sha256",
+                binding.file_sha256,
+                "--scope-content-sha256",
+                binding.content_sha256,
+                "--launch-binding-sha256",
+                binding.launch_binding_sha256,
+                "--",
+                *plan,
+            ],
+            cwd=ROOT,
+            timeout=NMAP_TIMEOUT_SECONDS + 30,
+            max_output_bytes=NMAP_MAX_OUTPUT_BYTES,
+            env=minimal_child_environment(ROOT, policy_name="range-sweep"),
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        if output is not None:
+            output.close()
+        del exc
+        print("range-sweep request could not be completed", file=sys.stderr)
+        return 2
+
+    if result.termination != "exited":
+        output.close()
+        sys.stdout.buffer.write(result.stdout)
+        sys.stderr.buffer.write(result.stderr)
+        return result.returncode if result.returncode else 125
+    if result.returncode != 0:
+        output.close()
+        sys.stdout.buffer.write(result.stdout)
+        sys.stderr.buffer.write(result.stderr)
+        return result.returncode
+    try:
+        capture = _read_runq_capture(ROOT, result)
+        _publish_output_file(output, OUTPUT_FILES[0], capture)
+    except (OSError, RuntimeError, ValueError):
+        print("range-sweep request could not be completed", file=sys.stderr)
+        return 2
+    finally:
+        if output is not None:
+            output.close()
+    sys.stdout.buffer.write(result.stdout)
+    sys.stderr.buffer.write(result.stderr)
+    return result.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

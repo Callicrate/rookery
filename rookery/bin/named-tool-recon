@@ -1,0 +1,138 @@
+#!/usr/bin/env -S python3 -I -B
+"""Cheap named-tool recon: search briefing/platform/local notes before generic guessing."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path.cwd()
+UTC = dt.timezone.utc
+SCRIPT_ROOT = Path(__file__).resolve().parents[1]
+if str(SCRIPT_ROOT / "lib") not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+
+from rookery.portable.adapters import run_bounded_argv
+from rookery.portable.environment import minimal_child_environment
+from rookery.portable.util import (
+    ensure_private_dir as _ensure_private_dir,
+)
+from rookery.portable.util import (
+    ensure_private_file as _ensure_private_file,
+)
+
+
+def iso():
+    return dt.datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def stamp():
+    return dt.datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def mkdir(p):
+    _ensure_private_dir(Path(p))
+
+
+def write_text(p, text, **kwargs):
+    p = Path(p)
+    _ensure_private_dir(p.parent)
+    _ensure_private_file(p)
+    p.write_text(text, **kwargs)
+    os.chmod(p, 0o600)
+
+
+def main():
+    os.umask(0o077)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("tool")
+    ap.add_argument(
+        "--paths",
+        nargs="*",
+        default=["TARGET.md", "README.md", "platform", "analysis", "docs", "state"],
+    )
+    ap.add_argument("--outdir", default="")
+    args = ap.parse_args()
+    environment = minimal_child_environment(ROOT, policy_name="named-tool-recon")
+    out = (
+        Path(args.outdir)
+        if args.outdir
+        else ROOT
+        / "analysis/named-tool-recon"
+        / f"{stamp()}-{re.sub(r'[^A-Za-z0-9_.-]+', '_', args.tool)}"
+    )
+    mkdir(out)
+    pat = args.tool
+    cmd = ["./bin/safe-rg", pat, *args.paths]
+    try:
+        result = run_bounded_argv(
+            cmd,
+            cwd=ROOT,
+            timeout=120,
+            max_output_bytes=2_500_000,
+            env=environment,
+        )
+        returncode = result.returncode
+        stdout = result.stdout.decode("utf-8", errors="replace")
+        stderr = result.stderr.decode("utf-8", errors="replace")
+    except (OSError, RuntimeError, ValueError) as exc:
+
+        returncode = 999
+        stdout = ""
+        stderr = str(exc)
+    write_text(out / "safe-rg.stdout", stdout, encoding="utf-8", errors="replace")
+    write_text(out / "safe-rg.stderr", stderr, encoding="utf-8", errors="replace")
+    lines = [
+        "# Named Tool Recon",
+        "",
+        f"Created: {iso()}",
+        "",
+        f"Tool/string: `{args.tool}`",
+        "",
+        "## Scope",
+        "",
+        "Cheap local/platform/briefing search before generic credential guessing or broad exploitation.",
+        "",
+        "## Command",
+        "",
+        "```bash",
+        " ".join(cmd),
+        "```",
+        "",
+        "## Findings",
+        "",
+        "See `safe-rg.stdout` and `safe-rg.stderr`.",
+        "",
+        "## Next",
+        "",
+        "- If the named tool appears in briefing/platform JSON, inspect exact local path or remote filesystem references.",
+        "- If absent, do not assume it is exploitable; fall back to normal category recon.",
+    ]
+    write_text(out / "REPORT.md", "\n".join(lines) + "\n", encoding="utf-8")
+    write_text(out / "manifest.json",
+        json.dumps(
+            {
+                "created_at": iso(),
+                "tool": args.tool,
+                "paths": args.paths,
+                "returncode": returncode,
+                "report": str(out / "REPORT.md"),
+                "environment": environment.metadata()["environment"],
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    print(str(out / "REPORT.md"))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

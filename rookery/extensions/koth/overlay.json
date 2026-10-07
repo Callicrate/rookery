@@ -1,0 +1,17 @@
+{
+  "scoring": {
+    "action_kinds": [
+      "flag",
+      "free_text",
+      "multi_objective",
+      "proof_artifact",
+      "no_submit_evidence",
+      "handle_write"
+    ]
+  },
+  "surface": {
+    "bundles": [
+      "koth"
+    ]
+  }
+}

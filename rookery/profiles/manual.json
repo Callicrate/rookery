@@ -1,0 +1,41 @@
+{
+  "profile": "manual",
+  "adapter": {
+    "id": "manual",
+    "config": {
+      "inventory_path": "platform/manual_inventory.json"
+    }
+  },
+  "capabilities": {
+    "required": [
+      "local_shell"
+    ],
+    "optional": [
+      "platform_inventory",
+      "challenge_details",
+      "release_changes",
+      "network",
+      "scoring"
+    ]
+  },
+  "session": {
+    "lifecycle": "none",
+    "dynamic_attempts": false,
+    "required_freshness_seconds": 0
+  },
+  "scoring": {
+    "completion_mode": "evidence_only",
+    "action_kinds": [
+      "no_submit_evidence"
+    ]
+  },
+  "surface": {
+    "bundles": [
+      "core",
+      "research",
+      "scoring-review",
+      "writeups",
+      "unstick"
+    ]
+  }
+}

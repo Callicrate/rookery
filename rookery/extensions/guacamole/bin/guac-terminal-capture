@@ -1,0 +1,356 @@
+#!/usr/bin/env -S python3 -I -B
+"""Run/capture a Guacamole terminal command with byte-safe evidence artifacts when possible."""
+
+from __future__ import annotations
+import argparse
+import datetime as dt
+import hashlib
+import importlib.util
+import json
+import os
+import sys
+from pathlib import Path
+
+SOURCE_ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path.cwd()
+UTC = dt.timezone.utc
+BIN_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(SOURCE_ROOT / "lib"))
+EXTENSION_ROOT = Path(__file__).resolve().parents[1]
+
+from rookery.portable.adapters import (  # noqa: E402
+    render_argv_template,
+    run_bounded_argv,
+)
+from rookery.portable.control import mutation_guard  # noqa: E402
+from rookery.portable.environment import EnvironmentPolicyError  # noqa: E402
+from rookery.portable.optional_helper import require_bound_runtime_workspace  # noqa: E402
+from rookery.portable.store import EventStore  # noqa: E402
+from rookery.portable.util import file_lock  # noqa: E402
+
+
+def _load_extension_module(name: str):
+    """Load one colocated extension module without admitting it to sys.path."""
+
+    path = EXTENSION_ROOT / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"_rookery_guac_{name}", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("unable to load required Guacamole helper module")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_guac_environment = _load_extension_module("guac_environment")
+_guac_paths = _load_extension_module("guac_paths")
+guac_minimal_environment = _guac_environment.guac_minimal_environment
+read_guac_configuration = _guac_environment.read_guac_configuration
+transport_child_environment = _guac_environment.transport_child_environment
+GuacOutput = _guac_paths.GuacOutput
+GuacOutputPathError = _guac_paths.GuacOutputPathError
+resolve_guac_output = _guac_paths.resolve_guac_output
+
+DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024
+MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+MAX_TIMEOUT_SECONDS = 3_600
+
+
+def iso():
+    return dt.datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def stamp():
+    return dt.datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def sha(p: Path):
+    h = hashlib.sha256()
+    try:
+        with p.open("rb") as f:
+            for b in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(b)
+        return h.hexdigest()
+    except Exception:
+        return ""
+
+
+def jwrite(output: GuacOutput, name: str, obj):
+    output.write_text(
+        name,
+        json.dumps(obj, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+    )
+
+
+def run(
+    argv,
+    timeout,
+    child_environment,
+    max_output_bytes=DEFAULT_MAX_OUTPUT_BYTES,
+):
+    try:
+        return run_bounded_argv(
+            argv,
+            cwd=ROOT,
+            timeout=timeout,
+            max_output_bytes=max_output_bytes,
+            env=child_environment,
+        )
+    except Exception:
+
+        class R:
+            pass
+
+        r = R()
+        r.returncode = 999
+        r.stdout = b""
+        r.stderr = b"guacamole child launch failed"
+        r.termination = "error"
+        r.environment = child_environment.metadata()["environment"]
+        return r
+
+
+def main():
+    os.umask(0o077)
+    ap = argparse.ArgumentParser(
+        description="Capture a Guacamole terminal command and evidence bundle."
+    )
+    ap.add_argument("command", nargs="?", default="")
+    ap.add_argument("--profile", default="ssh-terminal")
+    ap.add_argument("--console", default="default")
+    ap.add_argument("--owner", default="coordinator")
+    ap.add_argument("--timeout", type=int, default=180)
+    ap.add_argument("--outdir", default="")
+    ap.add_argument("--no-lease", action="store_true")
+    ap.add_argument(
+        "--max-output-bytes",
+        type=int,
+        default=DEFAULT_MAX_OUTPUT_BYTES,
+    )
+    args = ap.parse_args()
+    require_bound_runtime_workspace(ROOT)
+    if args.timeout <= 0 or args.timeout > MAX_TIMEOUT_SECONDS:
+        ap.error(f"--timeout must be between 1 and {MAX_TIMEOUT_SECONDS}")
+    if args.max_output_bytes <= 0 or args.max_output_bytes > MAX_OUTPUT_BYTES:
+        ap.error(f"--max-output-bytes must be between 1 and {MAX_OUTPUT_BYTES}")
+    try:
+        output = resolve_guac_output(
+            ROOT,
+            args.outdir or None,
+            default_parts=("terminal-capture", stamp()),
+        )
+    except GuacOutputPathError as error:
+        ap.error(str(error))
+    out = output.path
+    command_path = out / "command.txt"
+    try:
+        configuration = read_guac_configuration(ROOT)
+        lease_environment = guac_minimal_environment(
+            ROOT, policy_name="guac-console-lease-minimal"
+        )
+        # Prefer explicit terminal-capture command, then the Guac SSH wrapper,
+        # then the evidence-only bundle.  This full selection and its child
+        # policy are validated before the evidence directory is touched.
+        legacy_tool = configuration.get("GUAC_TERMINAL_CAPTURE_COMMAND") or ""
+        argv_json = configuration.get("GUAC_TERMINAL_CAPTURE_ARGV") or ""
+        if legacy_tool:
+            cmd = []
+            legacy_disabled = True
+            child_owns_lock = False
+            capture_environment = None
+        elif argv_json:
+            cmd = render_argv_template(
+                json.loads(argv_json),
+                {
+                    "command": args.command,
+                    "commands_file": str(command_path),
+                    "profile": args.profile,
+                    "outdir": str(out),
+                    "console": args.console,
+                },
+                label="guacamole terminal capture",
+            )
+            legacy_disabled = False
+            child_owns_lock = False
+            capture_environment = transport_child_environment(
+                ROOT,
+                configuration,
+                policy_name="guac-terminal-capture-transport",
+                keys_control="GUAC_TERMINAL_CAPTURE_ENV_KEYS",
+            )
+        elif (BIN_ROOT / "guac-ssh-exec").exists() and args.command:
+            cmd = [
+                str(BIN_ROOT / "guac-ssh-exec"),
+                "--profile",
+                args.profile,
+                "--outdir",
+                    str(output.child_directory("guac-ssh-exec")),
+                args.command,
+                "--contact-sheet",
+            ]
+            legacy_disabled = False
+            child_owns_lock = True
+            capture_environment = guac_minimal_environment(
+                ROOT, policy_name="guac-terminal-capture-ssh-helper-minimal"
+            )
+        else:
+            cmd = []
+            legacy_disabled = False
+            child_owns_lock = False
+            capture_environment = None
+    except (EnvironmentPolicyError, ValueError, json.JSONDecodeError) as error:
+        ap.error(str(error))
+
+    try:
+        output.prepare()
+    except (GuacOutputPathError, OSError) as error:
+        ap.error(str(error))
+    output.write_text("command.txt", args.command + "\n")
+    lease = None
+    if not args.no_lease:
+        lease_argv = [
+            str(BIN_ROOT / "console-lease"),
+            "claim",
+            args.console,
+            "--owner",
+            args.owner,
+            "--mode",
+            "input",
+            "--minutes",
+            "30",
+            "--reason",
+            "guac-terminal-capture",
+            "--evidence-root",
+            str(out),
+        ]
+        output.before_external_tool()
+        lease = run(lease_argv, 30, lease_environment, args.max_output_bytes)
+        output.after_external_tool()
+        output.write_text(
+            "lease.stdout",
+            lease.stdout.decode("utf-8", errors="replace"),
+            errors="replace",
+        )
+        output.write_text(
+            "lease.stderr",
+            lease.stderr.decode("utf-8", errors="replace"),
+            errors="replace",
+        )
+        if lease.returncode != 0 or lease.termination != "exited":
+            jwrite(
+                output,
+                "manifest.json",
+                {
+                    "created_at": iso(),
+                    "status": "lease-denied",
+                    "console": args.console,
+                    "owner": args.owner,
+                    "lease_rc": lease.returncode,
+                    "environment": lease.environment,
+                },
+            )
+            print(f"lease denied; evidence={out}", file=sys.stderr)
+            return lease.returncode
+    rec = {
+        "created_at": iso(),
+        "profile": args.profile,
+        "console": args.console,
+        "owner": args.owner,
+        "command": args.command,
+        "outdir": str(out),
+        "used_command_argv": cmd,
+        "status": "not-run",
+    }
+    if lease is not None:
+        rec["lease_environment"] = lease.environment
+    if cmd:
+        assert capture_environment is not None
+        if child_owns_lock:
+            output.before_external_tool()
+            cp = run(cmd, args.timeout, capture_environment, args.max_output_bytes)
+            output.after_external_tool()
+        else:
+            store = EventStore(ROOT)
+            observed_generation = store.current_stop_generation()
+            with file_lock(ROOT / "state" / "mutation.lock"):
+                mutation_guard(store, observed_generation)
+                output.before_external_tool()
+                cp = run(cmd, args.timeout, capture_environment, args.max_output_bytes)
+            output.after_external_tool()
+        stdout = cp.stdout.decode("utf-8", errors="replace")
+        stderr = cp.stderr.decode("utf-8", errors="replace")
+        output.write_text("stdout.log", stdout, errors="replace")
+        output.write_text("stderr.log", stderr, errors="replace")
+        # Terminal text is whatever stdout gives unless a tool wrote a transcript.
+        transcript = out / "transcript.txt"
+        if transcript.exists() or transcript.is_symlink():
+            output.after_external_tool()
+        else:
+            output.write_text("transcript.txt", stdout[:200000], errors="replace")
+        rec.update(
+            {
+                "status": "ok"
+                if cp.returncode == 0 and cp.termination == "exited"
+                else "tool-failed",
+                "returncode": cp.returncode,
+                "termination": cp.termination,
+                "environment": cp.environment,
+            }
+        )
+    else:
+        output.write_text("transcript.txt", "")
+        rec.update(
+            {
+                "status": "legacy-shell-template-disabled"
+                if legacy_disabled
+                else "no-capture-adapter",
+                "note": "Set GUAC_TERMINAL_CAPTURE_ARGV or use guac-ssh-exec manually. Manual transcript template created.",
+            }
+        )
+    if not (out / "transcript.txt").read_text(errors="replace").strip():
+        output.write_text(
+            "manual_transcript_template.md",
+            "# Manual Terminal Transcript\n\nSource screenshot/contact sheet: <path>\nConsole: "
+            + args.console
+            + "\nCommand: `"
+            + args.command.replace("`", "\\`")
+            + "`\nCaptured at: "
+            + iso()
+            + "\n\n```text\n<transcribe visible terminal text here>\n```\n",
+        )
+    # Hash all top-level files and selected nested outputs.
+    hashes = []
+    output.after_external_tool()
+    for p in sorted(out.rglob("*")):
+        if p.is_symlink():
+            raise RuntimeError(f"private output must not be a symlink: {p}")
+        if p.is_dir():
+            continue
+        elif p.is_file():
+            hashes.append({"path": str(p), "sha256": sha(p), "size": p.stat().st_size})
+        else:
+            raise RuntimeError(f"private output must be regular: {p}")
+    rec["hashes"] = hashes
+    jwrite(output, "manifest.json", rec)
+    if not args.no_lease:
+        output.before_external_tool()
+        run(
+            [
+                str(BIN_ROOT / "console-lease"),
+                "release",
+                args.console,
+                "--owner",
+                args.owner,
+            ],
+            30,
+            lease_environment,
+            args.max_output_bytes,
+        )
+        output.after_external_tool()
+    print(f"evidence={out}")
+    print(f"status={rec['status']}")
+    return 0 if rec["status"] in ("ok", "no-capture-adapter") else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

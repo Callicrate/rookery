@@ -1,0 +1,83 @@
+#!/usr/bin/env -S python3 -I -B
+"""Concise control/auth status view for operators and coordinators."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+from pathlib import Path
+
+ROOT = Path.cwd()
+UTC = dt.timezone.utc
+
+
+def iso():
+    return dt.datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def jread(p, default=None):
+    try:
+        return json.loads(Path(p).read_text(errors="replace"))
+    except Exception:
+        return default
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+    markers = {
+        name: (ROOT / "control" / name).exists()
+        for name in [
+            "STOP_REQUESTED",
+            "AUTH_PAUSED",
+            "PLATFORM_HEAVY_PAUSED",
+            "AUTH_EXPIRED",
+        ]
+    }
+    hs = sorted((ROOT / "platform/session-health").glob("*/health.json"))
+    latest = str(hs[-1]) if hs else ""
+    h = jread(hs[-1], {}) if hs else {}
+    csum = (h.get("cookie_filter") or {}).get("summary") or {}
+    status = (
+        "operator_stop"
+        if markers["STOP_REQUESTED"]
+        else "auth_pause"
+        if markers["AUTH_PAUSED"]
+        or markers["PLATFORM_HEAVY_PAUSED"]
+        or markers["AUTH_EXPIRED"]
+        else "active_or_unknown"
+    )
+    rec = {
+        "created_at": iso(),
+        "control_status": status,
+        "markers": markers,
+        "latest_health_path": latest,
+        "health_status": h.get("status", "unknown"),
+        "cookie_status": csum.get("status", "unknown"),
+        "required_cookie_expiry": csum.get("nearest_expiry_utc") or "",
+        "recommended_posture": (
+            "wind down: operator stop requested"
+            if status == "operator_stop"
+            else "pause platform-heavy work; local artifact analysis can continue"
+            if status == "auth_pause"
+            else "normal, but run strict health before platform-heavy lanes"
+        ),
+    }
+    if args.json:
+        print(json.dumps(rec, indent=2, ensure_ascii=False))
+    else:
+        print(
+            f"control={rec['control_status']} health={rec['health_status']} cookie={rec['cookie_status']}"
+        )
+        if rec["required_cookie_expiry"]:
+            print(f"required_cookie_expiry={rec['required_cookie_expiry']}")
+        if latest:
+            print(f"latest_health={latest}")
+        print(f"recommended={rec['recommended_posture']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

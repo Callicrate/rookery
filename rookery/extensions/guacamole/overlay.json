@@ -1,0 +1,13 @@
+{
+  "capabilities": {
+    "optional": [
+      "console"
+    ]
+  },
+  "surface": {
+    "bundles": [
+      "console",
+      "guacamole"
+    ]
+  }
+}

@@ -1,0 +1,693 @@
+#!/usr/bin/env -S python3 -I -B
+"""Filter browser cookie exports to relevant platform domains and report freshness.
+
+Reads common browser/Playwright cookie JSON shapes or Netscape cookie text, writes a
+platform-ready Cookie header plus summary evidence. Does not redact or mutate input.
+"""
+
+from __future__ import annotations
+
+# ruff: noqa: E402
+
+import argparse
+import datetime as dt
+import json
+import math
+import os
+import re
+import stat
+import sys
+import time
+import urllib.parse
+from collections.abc import Mapping
+from pathlib import Path
+
+ROOT = Path.cwd()
+UTC = dt.timezone.utc
+SCRIPT_ROOT = Path(__file__).resolve().parents[1]
+if str(SCRIPT_ROOT / "lib") not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+
+from rookery.portable.environment import (  # noqa: E402
+    EnvClass,
+    EnvKey,
+    EnvironmentPolicyError,
+    read_declared_environment,
+)
+from rookery.portable.cookie_output import (  # noqa: E402
+    CookieOutput,
+    CookieOutputError,
+    preflight_cookie_output,
+    prepare_cookie_output,
+    read_cookie_output,
+    write_new_cookie_output,
+)
+
+DEFAULT_COOKIE_SOURCE_BYTES = 2 * 1024 * 1024
+MAX_COOKIE_SOURCE_BYTES = 8 * 1024 * 1024
+DEFAULT_COOKIE_COUNT = 50_000
+MAX_COOKIE_COUNT = 100_000
+DEFAULT_COOKIE_FIELD_BYTES = 4 * 1024
+MAX_COOKIE_FIELD_BYTES = 64 * 1024
+DEFAULT_COOKIE_LINE_BYTES = 8 * 1024
+MAX_COOKIE_LINE_BYTES = 256 * 1024
+DEFAULT_SELECTED_JSON_BYTES = 16 * 1024 * 1024
+MAX_SELECTED_JSON_BYTES = 32 * 1024 * 1024
+DEFAULT_COOKIE_HEADER_BYTES = 1024 * 1024
+MAX_COOKIE_HEADER_BYTES = 4 * 1024 * 1024
+SOURCE_READ_CHUNK_BYTES = 64 * 1024
+
+# Cookie values are deliberately not configuration. This helper resolves only
+# exact path references and settings that influence filtering; it never copies
+# the caller's ambient environment into a broader mapping.
+_COOKIE_FILTER_ENV_KEYS = (
+    EnvKey("COOKIES_LATEST", EnvClass.SESSION_SECRET_REF),
+    EnvKey("PLATFORM_COOKIES_FILE", EnvClass.SESSION_SECRET_REF),
+    EnvKey("COOKIES_FILE", EnvClass.SESSION_SECRET_REF),
+    EnvKey("COOKIE_FILTER_DOMAINS", EnvClass.ROOKERY_CONFIG),
+    EnvKey("PLATFORM_COOKIE_DOMAINS", EnvClass.ROOKERY_CONFIG),
+    EnvKey("COOKIE_FILTER_URLS", EnvClass.ROOKERY_CONFIG),
+    EnvKey("PLATFORM_URL", EnvClass.ROOKERY_CONFIG),
+    EnvKey("PLATFORM_API_URL", EnvClass.ROOKERY_CONFIG),
+    EnvKey("PLATFORM_SESSION_URL", EnvClass.ROOKERY_CONFIG),
+    EnvKey("AUTH_EXPIRY_SAFETY_MINUTES", EnvClass.ROOKERY_CONFIG),
+    EnvKey("COOKIE_FILTER_MAX_SOURCE_BYTES", EnvClass.ROOKERY_CONFIG),
+    EnvKey("COOKIE_FILTER_MAX_COOKIES", EnvClass.ROOKERY_CONFIG),
+    EnvKey("COOKIE_FILTER_MAX_FIELD_BYTES", EnvClass.ROOKERY_CONFIG),
+    EnvKey("COOKIE_FILTER_MAX_LINE_BYTES", EnvClass.ROOKERY_CONFIG),
+    EnvKey("COOKIE_FILTER_MAX_SELECTED_JSON_BYTES", EnvClass.ROOKERY_CONFIG),
+    EnvKey("COOKIE_FILTER_MAX_HEADER_BYTES", EnvClass.ROOKERY_CONFIG),
+)
+
+
+class CookieFilterError(RuntimeError):
+    """A safe-to-report refusal reason that never includes cookie content."""
+
+
+def iso(ts=None):
+    if ts is None:
+        return dt.datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    return dt.datetime.fromtimestamp(float(ts), UTC).isoformat().replace("+00:00", "Z")
+
+
+def stamp():
+    return dt.datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def safe(s):
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(s))[:120] or "item"
+
+
+def write_output_text(output: CookieOutput, name: str, text: str) -> Path:
+    return write_new_cookie_output(output, name, text.encode("utf-8"))
+
+
+def jwrite(output: CookieOutput, obj: object) -> Path:
+    return write_output_text(
+        output,
+        "summary.json",
+        json.dumps(obj, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+    )
+
+
+def limit_value(
+    candidate: int | None,
+    env: Mapping[str, str],
+    env_name: str,
+    default: int,
+    maximum: int,
+) -> int:
+    raw = candidate if candidate is not None else env.get(env_name, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise CookieFilterError("invalid_limit") from exc
+    if value <= 0 or value > maximum:
+        raise CookieFilterError("invalid_limit")
+    return value
+
+
+def configured_limits(
+    args: argparse.Namespace, env: Mapping[str, str]
+) -> dict[str, int]:
+    return {
+        "source_bytes": limit_value(
+            args.max_source_bytes,
+            env,
+            "COOKIE_FILTER_MAX_SOURCE_BYTES",
+            DEFAULT_COOKIE_SOURCE_BYTES,
+            MAX_COOKIE_SOURCE_BYTES,
+        ),
+        "cookie_count": limit_value(
+            args.max_cookies,
+            env,
+            "COOKIE_FILTER_MAX_COOKIES",
+            DEFAULT_COOKIE_COUNT,
+            MAX_COOKIE_COUNT,
+        ),
+        "field_bytes": limit_value(
+            args.max_field_bytes,
+            env,
+            "COOKIE_FILTER_MAX_FIELD_BYTES",
+            DEFAULT_COOKIE_FIELD_BYTES,
+            MAX_COOKIE_FIELD_BYTES,
+        ),
+        "line_bytes": limit_value(
+            args.max_line_bytes,
+            env,
+            "COOKIE_FILTER_MAX_LINE_BYTES",
+            DEFAULT_COOKIE_LINE_BYTES,
+            MAX_COOKIE_LINE_BYTES,
+        ),
+        "selected_json_bytes": limit_value(
+            args.max_selected_json_bytes,
+            env,
+            "COOKIE_FILTER_MAX_SELECTED_JSON_BYTES",
+            DEFAULT_SELECTED_JSON_BYTES,
+            MAX_SELECTED_JSON_BYTES,
+        ),
+        "header_bytes": limit_value(
+            args.max_header_bytes,
+            env,
+            "COOKIE_FILTER_MAX_HEADER_BYTES",
+            DEFAULT_COOKIE_HEADER_BYTES,
+            MAX_COOKIE_HEADER_BYTES,
+        ),
+    }
+
+
+def configured_min_valid_minutes(
+    candidate: float | None, env: Mapping[str, str]
+) -> float:
+    raw = (
+        candidate
+        if candidate is not None
+        else env.get("AUTH_EXPIRY_SAFETY_MINUTES", "10") or "10"
+    )
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise CookieFilterError("invalid_min_valid_minutes") from exc
+    if not math.isfinite(value) or value < 0:
+        raise CookieFilterError("invalid_min_valid_minutes")
+    return value
+
+
+def _open_cookie_source(path: Path) -> int:
+    try:
+        before = os.lstat(path)
+    except OSError as exc:
+        raise CookieFilterError("invalid_source") from exc
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+    ):
+        raise CookieFilterError("invalid_source")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise CookieFilterError("invalid_source") from exc
+    try:
+        source_state = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(source_state.st_mode)
+            or source_state.st_nlink != 1
+            or (source_state.st_dev, source_state.st_ino)
+            != (before.st_dev, before.st_ino)
+        ):
+            raise CookieFilterError("invalid_source")
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def source_starts_as_json(path: Path, maximum: int) -> bool:
+    descriptor = _open_cookie_source(path)
+    try:
+        scanned = 0
+        while scanned < maximum:
+            prefix = os.read(
+                descriptor,
+                min(SOURCE_READ_CHUNK_BYTES, maximum - scanned),
+            )
+            if not prefix:
+                return False
+            scanned += len(prefix)
+            for byte in prefix:
+                if byte not in b" \t\r\n":
+                    return byte in (ord("{"), ord("["))
+    finally:
+        os.close(descriptor)
+    return False
+
+
+def read_bounded_source(path: Path, maximum: int) -> bytes:
+    descriptor = _open_cookie_source(path)
+    data = bytearray()
+    try:
+        while True:
+            chunk = os.read(
+                descriptor,
+                min(SOURCE_READ_CHUNK_BYTES, maximum + 1 - len(data)),
+            )
+            if not chunk:
+                return bytes(data)
+            data.extend(chunk)
+            if len(data) > maximum:
+                raise CookieFilterError("source_too_large")
+    finally:
+        os.close(descriptor)
+
+
+def bounded_text(value: object, maximum: int) -> str:
+    text = str(value)
+    if len(text.encode("utf-8", errors="replace")) > maximum:
+        raise CookieFilterError("field_too_large")
+    return text
+
+
+def split_csv(s):
+    return [x.strip() for x in (s or "").split(",") if x.strip()]
+
+
+def host_from_url(u):
+    try:
+        return urllib.parse.urlparse(u).hostname or ""
+    except Exception:
+        return ""
+
+
+def exp_ts(v):
+    if v in (None, "", False):
+        return None
+    if isinstance(v, (int, float)):
+        if v <= 0:
+            return None
+        # Chrome/Playwright expirationDate/expires are epoch seconds.
+        return float(v) if v > 1000000000 else None
+    s = str(v).strip()
+    if not s or s.lower() in ("session", "none", "null"):
+        return None
+    try:
+        f = float(s)
+        return f if f > 1000000000 else None
+    except (TypeError, ValueError):
+        pass
+    for fmt in [
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S.%fZ",
+        "%Y-%m-%d %H:%M:%S",
+        "%a, %d %b %Y %H:%M:%S %Z",
+        "%a, %d-%b-%Y %H:%M:%S %Z",
+    ]:
+        try:
+            return dt.datetime.strptime(s, fmt).replace(tzinfo=UTC).timestamp()
+        except (TypeError, ValueError, OverflowError, OSError):
+            pass
+    return None
+
+
+def normalize_cookie(c: object, field_bytes: int):
+    if not isinstance(c, dict):
+        return None
+    name = c.get("name") or c.get("Name") or c.get("key") or c.get("Key")
+    value = (
+        c.get("value")
+        if "value" in c
+        else c.get("Value")
+        if "Value" in c
+        else c.get("val")
+    )
+    if name is None or value is None:
+        return None
+    domain = c.get("domain") or c.get("Domain") or c.get("host") or c.get("Host") or ""
+    path = c.get("path") or c.get("Path") or "/"
+    exp = c.get(
+        "expires",
+        c.get(
+            "expirationDate",
+            c.get(
+                "expiration", c.get("expiry", c.get("expires_at", c.get("expiresAt")))
+            ),
+        ),
+    )
+    name_text = bounded_text(name, field_bytes)
+    value_text = bounded_text(value, field_bytes)
+    domain_text = bounded_text(domain, field_bytes)
+    path_text = bounded_text(path, field_bytes)
+    exp_text = bounded_text(exp, field_bytes) if exp is not None else ""
+    ts = exp_ts(exp_text)
+    return {
+        "name": name_text,
+        "value": value_text,
+        "domain": domain_text,
+        "path": path_text,
+        "expires_ts": ts,
+        "expires_utc": iso(ts) if ts else None,
+        "session": ts is None,
+        "secure": bool(c.get("secure") or c.get("Secure")),
+        "httpOnly": bool(c.get("httpOnly") or c.get("HttpOnly")),
+    }
+
+
+def extract_cookies(obj: object, limits: dict[str, int]) -> list[dict[str, object]]:
+    out = []
+
+    def walk(x: object) -> None:
+        if isinstance(x, dict):
+            ck = normalize_cookie(x, limits["field_bytes"])
+            if ck:
+                if len(out) >= limits["cookie_count"]:
+                    raise CookieFilterError("too_many_cookies")
+                out.append(ck)
+                return
+            # Common wrappers: Playwright storage state has {cookies:[...]}
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for y in x:
+                walk(y)
+
+    walk(obj)
+    return out
+
+
+def parse_netscape(path: Path, limits: dict[str, int]) -> list[dict[str, object]]:
+    descriptor = _open_cookie_source(path)
+    out = []
+    source_bytes = 0
+    try:
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            while True:
+                line = handle.readline(limits["line_bytes"] + 1)
+                if not line:
+                    break
+                if len(line) > limits["line_bytes"]:
+                    raise CookieFilterError("line_too_large")
+                source_bytes += len(line)
+                if source_bytes > limits["source_bytes"]:
+                    raise CookieFilterError("source_too_large")
+                if not line or line.startswith(b"#"):
+                    continue
+                parts = line.rstrip(b"\r\n").split(b"\t")
+                if len(parts) < 7:
+                    continue
+                fields = parts[:7]
+                if any(len(field) > limits["field_bytes"] for field in fields):
+                    raise CookieFilterError("field_too_large")
+                dom, _flag, cookie_path, secure, exp, name, value = (
+                    field.decode("utf-8", errors="replace") for field in fields
+                )
+                expiry = exp_ts(exp)
+                if len(out) >= limits["cookie_count"]:
+                    raise CookieFilterError("too_many_cookies")
+                out.append(
+                    {
+                        "name": name,
+                        "value": value,
+                        "domain": dom,
+                        "path": cookie_path,
+                        "expires_ts": expiry,
+                        "expires_utc": iso(expiry) if expiry else None,
+                        "session": expiry is None,
+                        "secure": secure.upper() == "TRUE",
+                        "httpOnly": False,
+                    }
+                )
+        return out
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def load_cookies(path: Path, limits: dict[str, int]) -> tuple[list[dict[str, object]], str]:
+    if source_starts_as_json(path, limits["source_bytes"]):
+        try:
+            obj = json.loads(read_bounded_source(path, limits["source_bytes"]))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise CookieFilterError("invalid_json") from exc
+        return extract_cookies(obj, limits), "json"
+    return parse_netscape(path, limits), "netscape"
+
+
+def build_cookie_header(selected: list[dict[str, object]], maximum: int) -> str:
+    parts = []
+    total = 1  # Final newline.
+    for cookie in selected:
+        pair = f"{cookie['name']}={cookie['value']}"
+        pair_bytes = len(pair.encode("utf-8", errors="replace"))
+        separator_bytes = 2 if parts else 0
+        if total + separator_bytes + pair_bytes > maximum:
+            raise CookieFilterError("header_too_large")
+        parts.append(pair)
+        total += separator_bytes + pair_bytes
+    return "; ".join(parts)
+
+
+def selected_json_bytes(selected: list[dict[str, object]], maximum: int) -> bytes:
+    data = (
+        json.dumps(selected, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    ).encode("utf-8")
+    if len(data) > maximum:
+        raise CookieFilterError("selected_json_too_large")
+    return data
+
+
+def dom_match(cookie_domain, wanted):
+    cd = (cookie_domain or "").lstrip(".").lower()
+    w = (wanted or "").lstrip(".").lower()
+    if not w:
+        return True
+    return cd == w or cd.endswith("." + w) or w.endswith("." + cd)
+
+
+def relevant_domains(env: Mapping[str, str], args: argparse.Namespace) -> list[str]:
+    doms = []
+    doms += split_csv(args.domains)
+    doms += split_csv(
+        env.get("COOKIE_FILTER_DOMAINS") or env.get("PLATFORM_COOKIE_DOMAINS") or ""
+    )
+    urls = []
+    urls += split_csv(args.urls)
+    urls += split_csv(env.get("COOKIE_FILTER_URLS") or "")
+    for k in ["PLATFORM_URL", "PLATFORM_API_URL", "PLATFORM_SESSION_URL"]:
+        if env.get(k):
+            urls.append(env[k])
+    for u in urls:
+        h = host_from_url(u)
+        if h:
+            doms.append(h)
+    # de-dupe preserving order
+    seen = set()
+    out = []
+    for d in doms:
+        d = d.strip().lstrip(".")
+        if d and d not in seen:
+            seen.add(d)
+            out.append(d)
+    return out
+
+
+def default_cookie_file(env: Mapping[str, str], args: argparse.Namespace) -> str:
+    if args.file:
+        return args.file
+    for k in ["COOKIES_LATEST", "PLATFORM_COOKIES_FILE", "COOKIES_FILE"]:
+        if env.get(k):
+            return env[k]
+    return "platform/auth/cookies-latest.json"
+
+
+def main():
+    os.umask(0o077)
+    ap = argparse.ArgumentParser(
+        description="Filter cookies-latest.json to platform-relevant cookies and emit Cookie header/freshness summary."
+    )
+    ap.add_argument("--file", default="")
+    ap.add_argument("--domains", default="", help="comma-separated relevant domains")
+    ap.add_argument(
+        "--urls",
+        default="",
+        help="comma-separated URLs whose hosts imply relevant domains",
+    )
+    ap.add_argument("--outdir", default="")
+    ap.add_argument("--header-only", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--strict", action="store_true")
+    ap.add_argument("--min-valid-minutes", type=float, default=None)
+    ap.add_argument("--max-source-bytes", type=int, default=None)
+    ap.add_argument("--max-cookies", type=int, default=None)
+    ap.add_argument("--max-field-bytes", type=int, default=None)
+    ap.add_argument("--max-line-bytes", type=int, default=None)
+    ap.add_argument("--max-selected-json-bytes", type=int, default=None)
+    ap.add_argument("--max-header-bytes", type=int, default=None)
+    args = ap.parse_args()
+    try:
+        output_plan = preflight_cookie_output(ROOT, args.outdir)
+    except CookieOutputError:
+        print("cookie_filter_refused: invalid_output", file=sys.stderr)
+        return 2
+    try:
+        env = read_declared_environment(ROOT, _COOKIE_FILTER_ENV_KEYS).values
+    except EnvironmentPolicyError:
+        # Do not disclose source layers, values, or parser details in a
+        # credential-adjacent helper's public failure path.
+        print("cookie_filter_refused: invalid_environment", file=sys.stderr)
+        return 2
+    try:
+        limits = configured_limits(args, env)
+        min_valid = configured_min_valid_minutes(args.min_valid_minutes, env)
+    except CookieFilterError as exc:
+        print(f"cookie_filter_refused: {exc}", file=sys.stderr)
+        return 2
+    f = Path(default_cookie_file(env, args))
+    try:
+        output = prepare_cookie_output(output_plan)
+    except CookieOutputError:
+        print("cookie_filter_refused: invalid_output", file=sys.stderr)
+        return 2
+    now = time.time()
+    doms = relevant_domains(env, args)
+    try:
+        source_info = os.lstat(f)
+    except FileNotFoundError:
+        source_info = None
+    except OSError:
+        source_info = None
+    rec = {
+        "created_at": iso(),
+        "cookie_source_configured": bool(args.file or any(
+            env.get(key)
+            for key in ("COOKIES_LATEST", "PLATFORM_COOKIES_FILE", "COOKIES_FILE")
+        )),
+        "exists": source_info is not None,
+        "domains": doms,
+        "min_valid_minutes": min_valid,
+        "outdir": output.metadata_path,
+        "status": "missing",
+        "selected_count": 0,
+        "limits": limits,
+    }
+    cookies = []
+    fmt = "none"
+    try:
+        output.guard()
+        if source_info is not None:
+            st = source_info
+            rec.update(
+                {
+                    "mtime_utc": iso(st.st_mtime),
+                    "age_minutes": round((now - st.st_mtime) / 60, 2),
+                    "size": st.st_size,
+                }
+            )
+            cookies, fmt = load_cookies(f, limits)
+            rec["format"] = fmt
+            rec["total_count"] = len(cookies)
+            selected = []
+            for cookie in cookies:
+                if not doms or any(
+                    dom_match(str(cookie.get("domain", "")), domain)
+                    for domain in doms
+                ):
+                    selected.append(cookie)
+            expired = []
+            near = []
+            session = []
+            valid = []
+            usable = []
+            for cookie in selected:
+                ts = cookie.get("expires_ts")
+                if ts is None:
+                    session.append(cookie)
+                elif ts <= now:
+                    expired.append(cookie)
+                elif ts - now < min_valid * 60:
+                    near.append(cookie)
+                else:
+                    valid.append(cookie)
+                if ts is None or ts > now:
+                    usable.append(cookie)
+            header = build_cookie_header(usable, limits["header_bytes"])
+            selected_data = selected_json_bytes(
+                selected,
+                limits["selected_json_bytes"],
+            )
+            write_output_text(output, "cookie-header.txt", header + "\n")
+            write_new_cookie_output(output, "selected-cookies.json", selected_data)
+            rec.update(
+                {
+                    "status": "ok",
+                    "selected_count": len(selected),
+                    "usable_count": len(usable),
+                    "expired_count": len(expired),
+                    "near_expiry_count": len(near),
+                    "session_count": len(session),
+                    "valid_persistent_count": len(valid),
+                    "header_path": f"{output.metadata_path}/cookie-header.txt",
+                    "selected_path": f"{output.metadata_path}/selected-cookies.json",
+                }
+            )
+            expiries = [
+                cookie.get("expires_ts")
+                for cookie in selected
+                if cookie.get("expires_ts")
+            ]
+            if expiries:
+                rec["nearest_expiry_utc"] = iso(min(expiries))
+                rec["minutes_until_nearest_expiry"] = round(
+                    (min(expiries) - now) / 60,
+                    2,
+                )
+            if len(selected) == 0:
+                rec["status"] = "no_relevant_cookies"
+            elif len(usable) == 0:
+                rec["status"] = "expired"
+            elif near:
+                rec["status"] = "near_expiry"
+            elif expired:
+                rec["status"] = "ok_with_some_expired"
+    except CookieOutputError:
+        print("cookie_filter_refused: invalid_output", file=sys.stderr)
+        return 2
+    except CookieFilterError as exc:
+        rec.update({"status": "refused", "reason": str(exc)})
+        jwrite(output, rec)
+        print(f"cookie_filter_refused: {exc}", file=sys.stderr)
+        return 2
+    except (OSError, ValueError):
+        rec.update({"status": "refused", "reason": "invalid_source"})
+        jwrite(output, rec)
+        print("cookie_filter_refused: invalid_source", file=sys.stderr)
+        return 2
+    jwrite(output, rec)
+    if args.header_only:
+        if rec.get("header_path"):
+            print(read_cookie_output(output, "cookie-header.txt").decode("utf-8", "replace"), end="")
+    elif args.json:
+        print(json.dumps(rec, indent=2, ensure_ascii=False))
+    else:
+        print(
+            f"cookie_filter={rec.get('status')} selected={rec.get('selected_count', 0)} usable={rec.get('usable_count', 0)} summary={output.metadata_path}/summary.json"
+        )
+        if rec.get("header_path"):
+            print(f"header={rec['header_path']}")
+    bad = rec.get("status") in (
+        "missing",
+        "expired",
+        "near_expiry",
+        "no_relevant_cookies",
+    )
+    return 3 if args.strict and bad else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

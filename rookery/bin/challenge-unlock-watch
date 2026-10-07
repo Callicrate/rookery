@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+case "${1:-check}" in
+  check) shift || true; exec "$ROOT/bin/rookery" platform unlock-check "$@" ;;
+  *) echo "usage: challenge-unlock-watch check [--ingest] [--limit N]" >&2; exit 2 ;;
+esac

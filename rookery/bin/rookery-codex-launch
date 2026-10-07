@@ -1,0 +1,18 @@
+#!/usr/bin/env -S python3 -I -S -B
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "lib"))
+
+from rookery.portable.environment import codex_launcher_main  # noqa: E402
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(codex_launcher_main(root=ROOT))
+    except (OSError, ValueError) as exc:
+        print(f"rookery Codex launch failed: {exc}", file=sys.stderr)
+        raise SystemExit(2) from None

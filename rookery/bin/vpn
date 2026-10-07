@@ -1,0 +1,35 @@
+#!/usr/bin/env -S python3 -I -B
+"""Retired Rookery-managed VPN lifecycle surface.
+
+The release intentionally does not own a privileged VPN daemon. This shim must
+stay independent of workspace configuration and runtime state so it refuses
+before any profile, network, process, or privilege boundary is reached.
+"""
+
+from __future__ import annotations
+
+import sys
+
+
+REFUSAL = "vpn_privileged_supervision_unavailable"
+HELP = """Rookery-managed VPN lifecycle is unavailable in this release.
+
+Establish and stop the VPN through an externally supervised operator workflow
+before starting Rookery. Rookery does not inspect, start, stop, signal, or
+claim authority over that external VPN state.
+"""
+
+
+def main(argv: list[str]) -> int:
+    if argv in (["-h"], ["--help"]):
+        print(HELP, end="")
+        return 0
+    if argv == ["--version"]:
+        print("rookery-vpn-management-unavailable")
+        return 0
+    print(REFUSAL, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+case "${1:-list}" in
+  list) exec "$ROOT/bin/rookery" agent list ;;
+  register) shift; exec "$ROOT/bin/rookery" agent register "$@" ;;
+  close) shift; exec "$ROOT/bin/rookery" agent close "$@" ;;
+  integrate) shift; exec "$ROOT/bin/rookery" agent integrate "$@" ;;
+  *) echo "usage: agent-board [list|register|close|integrate]" >&2; exit 2 ;;
+esac

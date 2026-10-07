@@ -1,0 +1,41 @@
+[
+  {
+    "admission": {
+      "capability_gap": "bounded htb machine operator work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_htb_machine_operator:one-owner-one-report-path",
+      "evidence": "Rookery optional role catalog entry at adapters/htb/agents/ctf_htb_machine_operator.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_htb_machine_operator",
+    "requires_all": [],
+    "requires_any": [
+      "adapter:htb"
+    ],
+    "source": "adapters/htb/agents/ctf_htb_machine_operator.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded htb scaled event prioritizer work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_htb_scaled_event_prioritizer:one-owner-one-report-path",
+      "evidence": "Rookery optional role catalog entry at adapters/htb/agents/ctf_htb_scaled_event_prioritizer.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_htb_scaled_event_prioritizer",
+    "requires_all": [],
+    "requires_any": [
+      "adapter:htb"
+    ],
+    "source": "adapters/htb/agents/ctf_htb_scaled_event_prioritizer.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "HTB Sherlocks require a question-indexed incident timeline and cross-artifact evidence contract that machine exploitation and generic single-artifact forensics do not provide",
+      "distinct_contract": "ctf_htb_sherlock_analyst:one-incident-one-question-ledger",
+      "evidence": "HTB Sherlock adapter role at adapters/htb/agents/ctf_htb_sherlock_analyst.toml and regression coverage for question-ledger, provenance, and no-submit boundaries"
+    },
+    "id": "ctf_htb_sherlock_analyst",
+    "requires_all": [],
+    "requires_any": [
+      "adapter:htb"
+    ],
+    "source": "adapters/htb/agents/ctf_htb_sherlock_analyst.toml"
+  }
+]

@@ -1,0 +1,96 @@
+{
+    "capabilities": {
+        "platform_inventory": {
+            "availability": "available",
+            "health": "healthy",
+            "freshness": "fixture",
+            "read_write_scope": "read-only",
+            "permitted_mutations": []
+        },
+        "challenge_details": {
+            "availability": "available",
+            "health": "healthy",
+            "freshness": "fixture",
+            "read_write_scope": "read-only",
+            "permitted_mutations": []
+        },
+        "release_changes": {
+            "availability": "available",
+            "health": "healthy",
+            "freshness": "fixture",
+            "read_write_scope": "read-only",
+            "permitted_mutations": []
+        },
+        "session": {
+            "availability": "available",
+            "health": "healthy",
+            "freshness": "fixture",
+            "read_write_scope": "read-only",
+            "permitted_mutations": []
+        },
+        "collaboration": {
+            "availability": "available",
+            "health": "healthy",
+            "freshness": "fixture",
+            "read_write_scope": "read-only",
+            "permitted_mutations": []
+        },
+        "scoring": {
+            "availability": "available",
+            "health": "healthy",
+            "freshness": "fixture",
+            "read_write_scope": "reviewer-only",
+            "permitted_mutations": [
+                "flag",
+                "free_text",
+                "multi_objective",
+                "handle_write",
+                "proof_artifact",
+                "no_submit_evidence"
+            ]
+        }
+    },
+    "challenges": [
+        {
+            "id": "101",
+            "name": "Fixture Web",
+            "category": "web",
+            "value": 100,
+            "solved": false,
+            "files": [
+                {
+                    "path": "adapters/fixture/sample.bin",
+                    "url": "fixture://sample.bin",
+                    "size": 12
+                }
+            ]
+        },
+        {
+            "id": "102",
+            "name": "Fixture Rev",
+            "category": "rev",
+            "value": 200,
+            "solved": true
+        }
+    ],
+    "releases": [
+        {
+            "id": "101",
+            "released_at": "2026-01-01T00:00:00Z"
+        }
+    ],
+    "verdicts": {
+        "101:FIXTURE{accepted}": {
+            "correct": true,
+            "message": "accepted"
+        },
+        "101:FIXTURE{rejected}": {
+            "correct": false,
+            "message": "incorrect"
+        },
+        "default": {
+            "correct": false,
+            "message": "incorrect"
+        }
+    }
+}

@@ -1,0 +1,130 @@
+{
+  "agents": "agents.json",
+  "class": "SkillBitAdapter",
+  "docs": "README.md",
+  "env_example": "env.example",
+  "environment_requirements": {
+    "all": [
+      "SKILLBIT_URL",
+      "SKILLBIT_LOGIN_ORIGIN",
+      "SKILLBIT_EVENT_ID",
+      "SKILLBIT_ACCOUNT_ID",
+      "SKILLBIT_PARTICIPATION_MODE",
+      "SKILLBIT_USER",
+      "SKILLBIT_EMAIL",
+      "SKILLBIT_PASSWORD",
+      "BROWSER_CDP_URL",
+      "BROWSER_GATEWAY_URL",
+      "ADAPTER_CONFIG_BROWSER_SUPPORT_ORIGINS"
+    ],
+    "fixed": [
+      {
+        "name": "BROWSER_MODE",
+        "value": "cdp"
+      }
+    ]
+  },
+  "environment_schema": [
+    {
+      "legacy_import": false,
+      "name": "SKILLBIT_URL",
+      "target": "adapter.config.base_url",
+      "type": "https_origin"
+    },
+    {
+      "legacy_import": false,
+      "name": "SKILLBIT_LOGIN_ORIGIN",
+      "target": "adapter.config.login_origin",
+      "type": "https_origin"
+    },
+    {
+      "legacy_import": false,
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "name": "SKILLBIT_EVENT_ID",
+      "target": "adapter.config.event_id",
+      "type": "integer"
+    },
+    {
+      "choices": [
+        "individual",
+        "team"
+      ],
+      "legacy_import": false,
+      "name": "SKILLBIT_PARTICIPATION_MODE",
+      "target": "adapter.config.participation_mode",
+      "type": "enum"
+    },
+    {
+      "legacy_import": false,
+      "name": "SKILLBIT_TEAM_NAME",
+      "target": "adapter.config.expected_team_name",
+      "type": "string"
+    },
+    {
+      "legacy_import": false,
+      "maximum": 9007199254740991,
+      "minimum": 1,
+      "name": "SKILLBIT_ACCOUNT_ID",
+      "target": "adapter.config.account_id",
+      "type": "integer"
+    },
+    {
+      "credential": true,
+      "legacy_import": false,
+      "name": "SKILLBIT_USER",
+      "target": null,
+      "type": "string"
+    },
+    {
+      "credential": true,
+      "legacy_import": false,
+      "name": "SKILLBIT_EMAIL",
+      "target": null,
+      "type": "string"
+    },
+    {
+      "credential": true,
+      "legacy_import": false,
+      "name": "SKILLBIT_PASSWORD",
+      "target": null,
+      "type": "string"
+    },
+    {
+      "name": "ADAPTER_CONFIG_BROWSER_SUPPORT_ORIGINS",
+      "target": "adapter.config.browser_support_origins",
+      "type": "https_origin_array"
+    },
+    {
+      "maximum": 300,
+      "minimum": 1,
+      "name": "ADAPTER_CONFIG_SESSION_LEASE_SECONDS",
+      "target": "adapter.config.session_lease_seconds",
+      "type": "integer"
+    },
+    {
+      "maximum": 120,
+      "minimum": 1,
+      "name": "ADAPTER_CONFIG_TIMEOUT",
+      "target": "adapter.config.timeout",
+      "type": "integer"
+    },
+    {
+      "maximum": 1048576,
+      "minimum": 1024,
+      "name": "ADAPTER_CONFIG_MAX_RESPONSE_BYTES",
+      "target": "adapter.config.max_response_bytes",
+      "type": "integer"
+    }
+  ],
+  "id": "skillbit",
+  "module": "adapter.py",
+  "platform_origin_environment": [
+    "SKILLBIT_URL",
+    "SKILLBIT_LOGIN_ORIGIN"
+  ],
+  "platform_support_origins_environment": "ADAPTER_CONFIG_BROWSER_SUPPORT_ORIGINS",
+  "profile": "profile.json",
+  "schema_version": "1",
+  "tools": "tools.json"
+}

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+case "${1:-}" in
+  add) shift; exec "$ROOT/bin/rookery" retry add "$@" ;;
+  *) echo "usage: retry-schedule add <objective> --earliest <time> --trigger <text> --method <name>" >&2; exit 2 ;;
+esac

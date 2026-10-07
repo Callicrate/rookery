@@ -1,0 +1,157 @@
+#!/usr/bin/env -S python3 -I -B
+"""Lightweight artifact-evidence linter for CTF reports.
+
+Warns when screenshots/images/OCR are treated as exact evidence without a
+byte-safe companion text/json/html/log/raw artifact. Adjacent sidecars with the
+same stem satisfy the warning (for example tile.png + tile.txt).
+Observational only; does not redact or mutate evidence.
+"""
+
+from __future__ import annotations
+import argparse
+import json
+import re
+from pathlib import Path
+
+ROOT = Path.cwd()
+IMG = re.compile(
+    r"\b(screenshot|screen shot|contact sheet|tile|rendered image|ocr|image evidence|visual proof|stream frame)\b",
+    re.I,
+)
+TEXT_PATH = re.compile(
+    r"\b[\w./-]+\.(?:txt|json|html|htm|xml|csv|log|md|har|pcap|pcapng|bin|raw|stdout|stderr)\b",
+    re.I,
+)
+IMG_PATH = re.compile(r"\b[\w./-]+\.(?:png|jpg|jpeg|webp|gif|bmp|tiff?)\b", re.I)
+EXACT = re.compile(
+    r"\b(exact|proves|proof|source-backed|submit-safe|accepted-format|deterministic|byte-safe|bytes?)\b",
+    re.I,
+)
+SIDECAR_SUFFIXES = [
+    ".txt",
+    ".log",
+    ".json",
+    ".raw",
+    ".html",
+    ".htm",
+    ".md",
+    ".stdout",
+    ".stderr",
+]
+
+
+def resolve(ref: str, base: Path) -> Path:
+    p = Path(ref)
+    if not p.is_absolute():
+        # Prefer workspace root paths, then report-relative paths.
+        rootp = ROOT / p
+        if rootp.exists():
+            return rootp
+        return base.parent / p
+    return p
+
+
+def sidecar_exists(img_ref: str, base: Path) -> bool:
+    p = resolve(img_ref, base)
+    candidates = []
+    for suf in SIDECAR_SUFFIXES:
+        candidates.append(p.with_suffix(suf))
+        candidates.append(p.parent / (p.name + suf))
+    return any(c.exists() for c in candidates)
+
+
+def lint_file(p: Path):
+    txt = p.read_text(errors="replace")
+    warnings = []
+    if not (IMG.search(txt) and EXACT.search(txt)):
+        return warnings
+    text_paths = TEXT_PATH.findall(txt)
+    img_paths = IMG_PATH.findall(txt)
+    has_text_ref = bool(text_paths)
+    has_sidecar = any(sidecar_exists(ref, p) for ref in img_paths)
+    has_explicit_sidecar = bool(
+        re.search(
+            r"\b(sidecar|text artifact|byte-safe companion|transcript|raw response)\b",
+            txt,
+            re.I,
+        )
+    )
+    if img_paths and not (has_text_ref or has_sidecar or has_explicit_sidecar):
+        warnings.append(
+            {
+                "path": str(p),
+                "level": "warn",
+                "rule": "visual-evidence-needs-byte-safe-companion",
+                "message": "Report uses visual/screenshot/OCR evidence in an exact/proof context but does not reference or colocate a text/json/html/log/raw sidecar artifact.",
+            }
+        )
+    elif img_paths and (has_text_ref or has_sidecar):
+        # Satisfied; leave a low-severity note only in JSON users can ignore.
+        warnings.append(
+            {
+                "path": str(p),
+                "level": "ok",
+                "rule": "visual-evidence-sidecar-present",
+                "message": "Visual evidence has an adjacent or referenced byte-safe companion artifact.",
+            }
+        )
+    if (
+        "screenshot" in txt.lower()
+        and "only" in txt.lower()
+        and EXACT.search(txt)
+        and not (has_text_ref or has_sidecar or has_explicit_sidecar)
+    ):
+        warnings.append(
+            {
+                "path": str(p),
+                "level": "warn",
+                "rule": "screenshot-only-proof",
+                "message": "Screenshot-only exact proof is fragile; add raw response/text extraction if possible.",
+            }
+        )
+    return warnings
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Lint reports for fragile screenshot-only exact evidence."
+    )
+    ap.add_argument(
+        "paths", nargs="*", default=["analysis", "reports", "STATUS.md", "FINDINGS.md"]
+    )
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+    files = []
+    for a in args.paths:
+        p = ROOT / a
+        if p.is_file():
+            files.append(p)
+        elif p.is_dir():
+            files += [x for x in p.rglob("*.md") if x.is_file()]
+    all_results = []
+    for f in sorted(set(files)):
+        all_results += lint_file(f)
+    warns = [w for w in all_results if w["level"] == "warn"]
+    infos = [w for w in all_results if w["level"] != "warn"]
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "warnings": warns,
+                    "notes": infos,
+                    "warning_count": len(warns),
+                    "note_count": len(infos),
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+    else:
+        print(f"artifact_lint_warnings={len(warns)}")
+        for w in warns[:200]:
+            print(f"- {w['level']} {w['path']}: {w['message']}")
+    return 1 if warns else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

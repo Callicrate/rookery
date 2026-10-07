@@ -1,0 +1,1 @@
+/goal Stop the Rookery at the current stop generation. Spawn no new workers and perform no scoring/platform mutations. Checkpoint, harvest, close, preserve evidence, enforce closeout writeups, and write one improvements-only lessons-learned document.

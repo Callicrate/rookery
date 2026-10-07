@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+ensure_private_dir() {
+  local target=$1 current=. component
+  local -a parts
+  case "$target" in /*) current=/; target=${target#/};; esac
+  IFS=/ read -r -a parts <<< "$target"
+  for component in "${parts[@]}"; do
+    [ -z "$component" ] || [ "$component" = . ] && continue
+    [ "$component" != .. ] || { echo "refusing parent traversal in private output" >&2; return 1; }
+    [ "$current" = / ] && current=/$component || current=$current/$component
+    [ ! -L "$current" ] || { echo "refusing symlinked private output component: $current" >&2; return 1; }
+    if [ -e "$current" ]; then [ -d "$current" ] || { echo "refusing non-directory private output component: $current" >&2; return 1; }; else mkdir "$current"; fi
+  done
+  chmod 700 "$current"
+}
+ensure_private_file() {
+  local path=$1 parent=${1%/*}
+  [ "$parent" = "$path" ] && parent=.
+  ensure_private_dir "$parent" || return
+  [ ! -L "$path" ] || { echo "refusing symlinked private output: $path" >&2; return 1; }
+  [ ! -e "$path" ] || [ -f "$path" ] || { echo "refusing non-regular private output: $path" >&2; return 1; }
+  [ ! -e "$path" ] || chmod 600 "$path"
+}
+ensure_private_dir analysis
+out=analysis/crypto-string-triage.txt
+ensure_private_file "$out"
+find . -type f -maxdepth 4 -print0 | xargs -0 strings -a -n 6 2>/dev/null | sort | uniq -c | sort -nr | head -200 | tee "$out"
+chmod 600 "$out"

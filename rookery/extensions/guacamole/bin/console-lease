@@ -1,0 +1,264 @@
+#!/usr/bin/env -S python3 -I -B
+"""Simple live-console lease manager. One writer/input owner per console."""
+
+from __future__ import annotations
+import argparse
+import contextlib
+import datetime as dt
+import fcntl
+import json
+import os
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+SOURCE_ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path.cwd()
+UTC = dt.timezone.utc
+sys.path.insert(0, str(SOURCE_ROOT / "lib"))
+
+from rookery.portable.optional_helper import require_bound_runtime_workspace  # noqa: E402
+
+
+def iso():
+    return dt.datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _private_error(path: Path) -> ValueError:
+    return ValueError(f"private path must be a regular non-symlink path: {path}")
+
+
+def mkdir(p: Path) -> Path:
+    path = Path(os.path.abspath(os.fspath(p)))
+    workspace = Path(os.path.abspath(os.fspath(ROOT)))
+    try:
+        relative = path.relative_to(workspace)
+    except ValueError:
+        missing = []
+        current = path
+        while not os.path.lexists(current):
+            missing.append(current)
+            if current.parent == current:
+                raise _private_error(path)
+            current = current.parent
+        state = os.lstat(current)
+        if stat.S_ISLNK(state.st_mode) or not stat.S_ISDIR(state.st_mode):
+            raise _private_error(current)
+        for current in reversed(missing):
+            os.mkdir(current, 0o700)
+            os.chmod(current, 0o700)
+        os.chmod(path, 0o700)
+        return path
+    current = workspace
+    for part in relative.parts:
+        current /= part
+        if os.path.lexists(current):
+            state = os.lstat(current)
+            if stat.S_ISLNK(state.st_mode) or not stat.S_ISDIR(state.st_mode):
+                raise _private_error(current)
+        else:
+            os.mkdir(current, 0o700)
+        os.chmod(current, 0o700)
+    return path
+
+
+def private_file(p: Path) -> bool:
+    path = Path(p)
+    mkdir(path.parent)
+    if not os.path.lexists(path):
+        return False
+    state = os.lstat(path)
+    if stat.S_ISLNK(state.st_mode) or not stat.S_ISREG(state.st_mode):
+        raise _private_error(path)
+    os.chmod(path, 0o600)
+    return True
+
+
+@contextlib.contextmanager
+def private_lock(p: Path):
+    path = Path(p)
+    lock = path.with_name(f".{path.name}.lock")
+    private_file(lock)
+    descriptor = os.open(
+        lock,
+        os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        state = os.fstat(descriptor)
+        if not stat.S_ISREG(state.st_mode):
+            raise _private_error(lock)
+        os.chmod(lock, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def write_private_text(p: Path, text: str) -> None:
+    path = Path(p)
+    private_file(path)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        private_file(path)
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def state_path() -> Path:
+    return ROOT / "state/console_locks.json"
+
+
+def load():
+    p = state_path()
+    try:
+        private_file(p)
+        return json.loads(p.read_text(errors="replace"))
+    except Exception:
+        return {"updated_at": iso(), "leases": {}}
+
+
+def save(d):
+    p = state_path()
+    d["updated_at"] = iso()
+    write_private_text(
+        p,
+        json.dumps(d, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+    )
+
+
+def expired(rec):
+    try:
+        until = dt.datetime.fromisoformat(
+            (rec.get("expires_at") or "").replace("Z", "+00:00")
+        )
+        return until < dt.datetime.now(UTC)
+    except Exception:
+        return False
+
+
+def claim(args):
+    with private_lock(state_path()):
+        d = load()
+        leases = d.setdefault("leases", {})
+        key = args.console
+        rec = leases.get(key)
+        if rec and not expired(rec) and rec.get("owner") != args.owner and not args.force:
+            print(
+                f"lease_denied console={key} owner={rec.get('owner')} expires_at={rec.get('expires_at')} mode={rec.get('mode')}",
+                file=sys.stderr,
+            )
+            return 3
+        exp = (
+            (dt.datetime.now(UTC) + dt.timedelta(minutes=args.minutes))
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        leases[key] = {
+            "console": key,
+            "owner": args.owner,
+            "mode": args.mode,
+            "claimed_at": iso(),
+            "expires_at": exp,
+            "reason": args.reason,
+            "evidence_root": args.evidence_root,
+        }
+        save(d)
+    print(json.dumps(leases[key], indent=2, ensure_ascii=False))
+    return 0
+
+
+def release(args):
+    with private_lock(state_path()):
+        d = load()
+        leases = d.setdefault("leases", {})
+        key = args.console
+        rec = leases.get(key)
+        if rec and rec.get("owner") not in (args.owner, "") and not args.force:
+            print(f"release_denied console={key} owner={rec.get('owner')}", file=sys.stderr)
+            return 3
+        leases.pop(key, None)
+        save(d)
+    print(f"released {key}")
+    return 0
+
+
+def status(args):
+    d = load()
+    leases = d.get("leases", {})
+    # mark expired in output without mutating unless requested
+    if args.json:
+        print(json.dumps(d, indent=2, ensure_ascii=False))
+    else:
+        if not leases:
+            print("console_leases=0")
+        for k, r in sorted(leases.items()):
+            print(
+                f"- {k}: owner={r.get('owner')} mode={r.get('mode')} expires={r.get('expires_at')} expired={expired(r)} evidence={r.get('evidence_root')}"
+            )
+    return 0
+
+
+def observe(args):
+    d = load()
+    rec = (d.get("leases") or {}).get(args.console)
+    if rec and not expired(rec):
+        print(
+            f"console_observer_only console={args.console} writer={rec.get('owner')} until={rec.get('expires_at')}"
+        )
+    else:
+        print(
+            f"console_unleased console={args.console} observation_only_recommended_until_claimed"
+        )
+    return 0
+
+
+def main():
+    os.umask(0o077)
+    ap = argparse.ArgumentParser()
+    sub = ap.add_subparsers(dest="cmd")
+    c = sub.add_parser("claim")
+    c.add_argument("console")
+    c.add_argument("--owner", required=True)
+    c.add_argument("--mode", choices=["input", "observer"], default="input")
+    c.add_argument("--minutes", type=int, default=30)
+    c.add_argument("--reason", default="live console work")
+    c.add_argument("--evidence-root", default="")
+    c.add_argument("--force", action="store_true")
+    c.set_defaults(func=claim)
+    r = sub.add_parser("release")
+    r.add_argument("console")
+    r.add_argument("--owner", default="")
+    r.add_argument("--force", action="store_true")
+    r.set_defaults(func=release)
+    s = sub.add_parser("status")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=status)
+    o = sub.add_parser("observe")
+    o.add_argument("console")
+    o.set_defaults(func=observe)
+    args = ap.parse_args()
+    if not hasattr(args, "func"):
+        args = ap.parse_args(["status"])
+    require_bound_runtime_workspace(ROOT)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

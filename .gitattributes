@@ -1,0 +1,16 @@
+* text=auto
+
+# Shell entry points must stay runnable after a Windows checkout.
+*.sh text eol=lf
+*.py text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+go text eol=lf
+run-codex text eol=lf
+bin/* text eol=lf
+rookery/go text eol=lf
+rookery/run-codex text eol=lf
+rookery/bin/* text eol=lf
+rookery/adapters/**/bin/* text eol=lf
+rookery/extensions/**/bin/* text eol=lf

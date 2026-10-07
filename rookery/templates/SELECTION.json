@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Rookery exploration synthesis artifact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "campaign_id",
+    "selected_idea_ids",
+    "rationale",
+    "handoff_learning",
+    "park_reason",
+    "recheck_condition"
+  ],
+  "properties": {
+    "campaign_id": {
+      "type": "string",
+      "pattern": "^campaign_[a-z][a-z0-9_-]{0,79}$"
+    },
+    "selected_idea_ids": {
+      "type": "array",
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_-]{0,79}$"
+      }
+    },
+    "rationale": {
+      "type": "string"
+    },
+    "handoff_learning": {
+      "type": "string"
+    },
+    "park_reason": {
+      "type": "string"
+    },
+    "recheck_condition": {
+      "type": "string"
+    }
+  }
+}

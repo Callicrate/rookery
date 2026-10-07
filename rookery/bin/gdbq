@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [ $# -lt 1 ]; then echo "usage: gdbq <binary> [--cmd 'gdb command']..." >&2; exit 2; fi
+bin="$1"; shift
+cmds="set pagination off"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --cmd) cmds="$cmds
+$2"; shift 2;;
+    *) cmds="$cmds
+$1"; shift;;
+  esac
+done
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+printf "%s
+quit
+" "$cmds" > "$tmp"
+"$(dirname "$0")/runq" -t 120 -l gdbq -- gdb -q "$bin" -x "$tmp"

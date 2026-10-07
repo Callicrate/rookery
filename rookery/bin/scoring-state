@@ -1,0 +1,28 @@
+#!/usr/bin/env -S python3 -I -B
+import json
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+
+root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(root / "lib"))
+from rookery.portable.store import EventStore  # noqa: E402
+
+store = EventStore(root)
+projection = store.rebuild()
+if "--json" in sys.argv or "--write" in sys.argv:
+    print(
+        json.dumps(
+            {
+                "scoring_events": projection.get("scoring_events", []),
+                "proposals": projection["current"].get("proposals", {}),
+                "executions": projection["current"].get("executions", {}),
+            },
+            indent=2,
+        )
+    )
+else:
+    print(
+        f"scoring-events={len(projection.get('scoring_events', []))} proposals={len(projection['current'].get('proposals', {}))} executions={len(projection['current'].get('executions', {}))}"
+    )

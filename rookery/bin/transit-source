@@ -1,0 +1,622 @@
+#!/usr/bin/env -S python3 -I -B
+"""Optional dated transit source helper for OSINT lanes.
+
+Keeps the technique optional: it records GTFS/feed/source windows and stop
+sequences, but never treats nearest stops as proof without verifier review.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import datetime as dt
+import io
+import json
+import os
+import re
+import secrets
+import shutil
+import stat
+import sys
+import tempfile
+import time
+import zipfile
+from dataclasses import dataclass
+from pathlib import Path, PureWindowsPath
+
+ROOT = Path.cwd()
+UTC = dt.timezone.utc
+MAX_ARCHIVE_FILES = 10000
+MAX_UNCOMPRESSED_BYTES = 1000000000
+SCRIPT_ROOT = Path(__file__).resolve().parents[1]
+if str(SCRIPT_ROOT / "lib") not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+
+from rookery.portable.util import (  # noqa: E402
+    ensure_private_dir as _ensure_private_dir,
+    ensure_private_file as _ensure_private_file,
+)
+from rookery.portable.environment import (  # noqa: E402
+    EnvClass,
+    EnvKey,
+    EnvironmentPolicyError,
+    build_child_environment,
+    parse_name_array,
+    purpose_policy,
+    read_declared_environment,
+)
+from rookery.portable.network_policy import ExplicitNetworkPolicy  # noqa: E402
+from rookery.portable.scope import (  # noqa: E402
+    check_url,
+    load_canonical_compiled_scope,
+    open_scoped_url,
+    verify_canonical_compiled_scope_binding,
+)
+from rookery.portable.util import (  # noqa: E402
+    path_component_id,
+)
+
+_TRANSIT_NETWORK_CONTROL = (
+    EnvKey("TRANSIT_SOURCE_NETWORK_ENV_KEYS", EnvClass.ROOKERY_CONFIG),
+)
+_NETWORK_CLASSES = frozenset({EnvClass.PROXY_CREDENTIAL, EnvClass.CA_TRUST_PATH})
+OUTPUT_MARKER = ".rookery-transit-output"
+FAMILY_MARKER = ".rookery-transit-family"
+FAMILY_MARKER_BYTES = b"rookery transit family v1\n"
+MAX_OUTPUT_ATTEMPTS = 32
+MAX_FAMILY_ADMISSION_ATTEMPTS = 100
+FAMILY_ADMISSION_DELAY_SECONDS = 0.01
+
+
+def _after_family_mkdir() -> None:
+    """Test seam for the otherwise unobservable mkdir/marker crash window."""
+
+
+def iso():
+    return dt.datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def stamp():
+    return dt.datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _output_component(raw: str) -> str:
+    """Accept one fresh operator label below the fixed transit evidence root."""
+
+    if not raw:
+        return path_component_id(
+            f"transit-{stamp().lower()}-{secrets.token_hex(12)}", label="transit output"
+        )
+    path = Path(raw)
+    if path.is_absolute() or PureWindowsPath(raw).is_absolute():
+        raise ValueError("transit output must be workspace-relative")
+    parts = path.parts
+    if parts[:2] == ("research", "transit"):
+        parts = parts[2:]
+    if len(parts) != 1:
+        raise ValueError("transit output must name one fresh transit directory")
+    return path_component_id(parts[0], label="transit output")
+
+
+def _directory_flags() -> int:
+    return (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+
+
+def _read_exact_marker(directory: int, name: str, expected: bytes) -> bool:
+    try:
+        initial = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(initial.st_mode)
+            or initial.st_nlink != 1
+            or stat.S_IMODE(initial.st_mode) != 0o600
+            or initial.st_size != len(expected)
+        ):
+            return False
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory,
+        )
+    except OSError:
+        return False
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+            != (initial.st_dev, initial.st_ino, initial.st_size, initial.st_mtime_ns)
+        ):
+            return False
+        return os.read(descriptor, len(expected) + 1) == expected
+    finally:
+        os.close(descriptor)
+
+
+def _write_exact_marker(directory: int, name: str, value: bytes) -> None:
+    descriptor = os.open(
+        name,
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+        dir_fd=directory,
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+        if os.write(descriptor, value) != len(value):
+            raise OSError("transit marker write failed")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _reclaim_unmarked_family(directory: int) -> bool:
+    """Remove only an empty/partial initializer residue; never adopt it."""
+
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return False
+    for name in names:
+        if name != FAMILY_MARKER and not name.startswith(".pending-"):
+            return False
+        try:
+            info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        except OSError:
+            return False
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            return False
+    try:
+        for name in names:
+            os.unlink(name, dir_fd=directory)
+        os.fsync(directory)
+    except OSError:
+        return False
+    return True
+
+
+def _family_directory() -> tuple[Path, int]:
+    """Return a marker-owned family descriptor or reclaim only an empty crash remnant."""
+
+    research = ROOT / "research"
+    mkdir(research)
+    research_descriptor = os.open(research, _directory_flags())
+    try:
+        for _ in range(MAX_FAMILY_ADMISSION_ATTEMPTS):
+            created = False
+            try:
+                os.mkdir("transit", 0o700, dir_fd=research_descriptor)
+                created = True
+            except FileExistsError:
+                pass
+            try:
+                family_descriptor = os.open(
+                    "transit", _directory_flags(), dir_fd=research_descriptor
+                )
+            except OSError:
+                if created:
+                    raise
+                time.sleep(FAMILY_ADMISSION_DELAY_SECONDS)
+                continue
+            try:
+                info = os.fstat(family_descriptor)
+                if not stat.S_ISDIR(info.st_mode):
+                    raise OSError("transit family is not a directory")
+                if created:
+                    os.fchmod(family_descriptor, 0o700)
+                    _after_family_mkdir()
+                    _write_exact_marker(
+                        family_descriptor, FAMILY_MARKER, FAMILY_MARKER_BYTES
+                    )
+                    os.fsync(family_descriptor)
+                    return research / "transit", family_descriptor
+                if _read_exact_marker(
+                    family_descriptor, FAMILY_MARKER, FAMILY_MARKER_BYTES
+                ):
+                    return research / "transit", family_descriptor
+                # A competing creator may have made the directory but not yet
+                # published its marker.  Never use that directory unmarked.
+                os.close(family_descriptor)
+                family_descriptor = -1
+                time.sleep(FAMILY_ADMISSION_DELAY_SECONDS)
+                continue
+            except BaseException:
+                os.close(family_descriptor)
+                raise
+        # A creator may have crashed before marker publication. Reclaim only
+        # an empty unmarked directory, then establish a new owned directory;
+        # non-empty attacker-controlled directories are never adopted.
+        try:
+            family_descriptor = os.open(
+                "transit", _directory_flags(), dir_fd=research_descriptor
+            )
+        except OSError as exc:
+            raise OSError("transit family is unowned") from exc
+        try:
+            if not _reclaim_unmarked_family(family_descriptor):
+                raise OSError("transit family is unowned")
+        finally:
+            os.close(family_descriptor)
+        try:
+            os.rmdir("transit", dir_fd=research_descriptor)
+        except OSError as exc:
+            raise OSError("transit family is unowned") from exc
+        os.fsync(research_descriptor)
+        return _family_directory()
+    finally:
+        os.close(research_descriptor)
+
+
+@dataclass
+class TransitOutputDirectory:
+    """One pinned output directory; publication never reopens it by pathname."""
+
+    path: Path
+    descriptor: int
+    device: int
+    inode: int
+
+    def _verify_identity(self) -> None:
+        descriptor_info = os.fstat(self.descriptor)
+        if (descriptor_info.st_dev, descriptor_info.st_ino) != (self.device, self.inode):
+            raise OSError("transit output descriptor changed")
+        path_info = os.lstat(self.path)
+        if (
+            not stat.S_ISDIR(path_info.st_mode)
+            or stat.S_ISLNK(path_info.st_mode)
+            or (path_info.st_dev, path_info.st_ino) != (self.device, self.inode)
+        ):
+            raise OSError("transit output path was replaced")
+
+    def close(self) -> None:
+        os.close(self.descriptor)
+
+    def write_bytes(self, name: str, data: bytes, *, binding) -> None:
+        """Publish complete private bytes by retained parent descriptor only."""
+
+        if name != OUTPUT_MARKER:
+            name = path_component_id(name, label="transit output file")
+        if not isinstance(data, bytes):
+            raise TypeError("transit output must be bytes")
+        temporary = ".pending-" + secrets.token_hex(16)
+        verify_scope_binding(binding)
+        self._verify_identity()
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(temporary, flags, 0o600, dir_fd=self.descriptor)
+            os.fchmod(descriptor, 0o600)
+            offset = 0
+            while offset < len(data):
+                written = os.write(descriptor, data[offset:])
+                if written <= 0:
+                    raise OSError("transit output write failed")
+                offset += written
+            os.fsync(descriptor)
+            os.close(descriptor)
+            descriptor = None
+            # The binding and parent identity both have to remain current at
+            # the publication boundary.  No final path is opened by name.
+            verify_scope_binding(binding)
+            self._verify_identity()
+            os.link(
+                temporary,
+                name,
+                src_dir_fd=self.descriptor,
+                dst_dir_fd=self.descriptor,
+                follow_symlinks=False,
+            )
+            os.fsync(self.descriptor)
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            try:
+                os.unlink(temporary, dir_fd=self.descriptor)
+            except FileNotFoundError:
+                pass
+
+    def write_text(self, name: str, text: str, *, binding) -> None:
+        self.write_bytes(name, text.encode("utf-8"), binding=binding)
+
+    def write_json(self, name: str, value: object, *, binding) -> None:
+        self.write_text(
+            name,
+            json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+            binding=binding,
+        )
+
+
+def _create_output_directory(raw: str, *, binding) -> TransitOutputDirectory:
+    """Reserve one marker-owned no-clobber transit directory before writing."""
+
+    component = _output_component(raw)
+    base, family_descriptor = _family_directory()
+    try:
+        for attempt in range(MAX_OUTPUT_ATTEMPTS):
+            name = component
+            if attempt:
+                name = path_component_id(
+                    f"{component}-{secrets.token_hex(8)}", label="transit output"
+                )
+            output = base / name
+            try:
+                os.mkdir(name, 0o700, dir_fd=family_descriptor)
+            except FileExistsError:
+                if raw:
+                    raise ValueError("transit output already exists") from None
+                continue
+            descriptor = os.open(name, _directory_flags(), dir_fd=family_descriptor)
+            try:
+                os.fchmod(descriptor, 0o700)
+                info = os.fstat(descriptor)
+                pinned = TransitOutputDirectory(output, descriptor, info.st_dev, info.st_ino)
+                pinned.write_bytes(OUTPUT_MARKER, b"rookery transit output\n", binding=binding)
+                return pinned
+            except BaseException:
+                os.close(descriptor)
+                raise
+        raise RuntimeError("could not reserve a unique transit output directory")
+    finally:
+        os.close(family_descriptor)
+
+
+def mkdir(p):
+    _ensure_private_dir(p)
+
+
+def private_file(p):
+    _ensure_private_dir(p.parent)
+    _ensure_private_file(p)
+
+
+def verify_scope_binding(binding):
+    """Refuse scope or stop drift immediately before a live helper effect."""
+
+    return verify_canonical_compiled_scope_binding(
+        ROOT,
+        scope_generation=binding.scope_generation,
+        stop_generation=binding.stop_generation,
+        file_sha256=binding.file_sha256,
+        content_sha256=binding.content_sha256,
+        launch_binding_sha256=binding.launch_binding_sha256,
+    )
+
+
+def download_limit(scope):
+    limit = int(scope.get("max_attachment_bytes", 0) or 0)
+    if limit <= 0:
+        raise RuntimeError("compiled scope has no attachment byte bound")
+    return limit
+
+
+def transit_network_policy(scope):
+    """Resolve one declared proxy/TLS policy against the compiled event scope.
+
+    ``ExplicitNetworkPolicy`` binds declared CA bytes before TLS context use,
+    ignores ambient proxy/CA aliases, validates proxy authority against this
+    event, and supplies the redirect-safe opener used by ``download_feed``.
+    """
+
+    controls = read_declared_environment(ROOT, _TRANSIT_NETWORK_CONTROL)
+    names = parse_name_array(
+        controls.values.get("TRANSIT_SOURCE_NETWORK_ENV_KEYS"),
+        label="TRANSIT_SOURCE_NETWORK_ENV_KEYS",
+    )
+    environment = build_child_environment(
+        ROOT,
+        policy=purpose_policy(
+            "transit-source-network", allowed_classes=_NETWORK_CLASSES
+        ),
+        pass_names=names,
+    )
+    return ExplicitNetworkPolicy.from_child_environment(environment, scope=scope)
+
+
+def download_feed(url, output, max_bytes, *, scope, transport, binding):
+    with open_scoped_url(
+        scope,
+        url,
+        timeout=60,
+        attachment=True,
+        transport=transport,
+    ) as response:
+        data = response.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise RuntimeError("transit feed exceeds declared attachment byte bound")
+    output.write_bytes("feed.zip", data, binding=binding)
+    return data
+
+
+def extract_gtfs(archive, destination):
+    members = archive.infolist()
+    if len(members) > MAX_ARCHIVE_FILES:
+        raise ValueError(f"GTFS archive exceeds {MAX_ARCHIVE_FILES} files")
+    if sum(member.file_size for member in members) > MAX_UNCOMPRESSED_BYTES:
+        raise ValueError(
+            f"GTFS archive exceeds {MAX_UNCOMPRESSED_BYTES} uncompressed bytes"
+    )
+    base = destination.resolve()
+    for member in members:
+        unresolved = base / member.filename
+        current = base
+        for part in Path(member.filename).parts:
+            current /= part
+            if current.is_symlink():
+                raise ValueError(f"GTFS archive target is a symlink: {member.filename}")
+        target = unresolved.resolve()
+        try:
+            target.relative_to(base)
+        except ValueError as exc:
+            raise ValueError(f"unsafe GTFS archive path: {member.filename}") from exc
+        if member.is_dir():
+            mkdir(target)
+            continue
+        private_file(target)
+        with archive.open(member) as source, target.open("wb") as output:
+            shutil.copyfileobj(source, output)
+        os.chmod(target, 0o600)
+
+
+def read_gtfs_dir(root):
+    def rows(name, limit=100000):
+        f = root / name
+        if not f.exists():
+            return []
+        with f.open(newline="", encoding="utf-8-sig", errors="replace") as fp:
+            return [r for _, r in zip(range(limit), csv.DictReader(fp))]
+
+    stops = rows("stops.txt", 200000)
+    routes = rows("routes.txt", 200000)
+    trips = rows("trips.txt", 200000)
+    stop_times = rows("stop_times.txt", 500000)
+    cal = rows("calendar.txt", 100000)
+    dates = rows("calendar_dates.txt", 100000)
+    return {
+        "stops": stops,
+        "routes": routes,
+        "trips": trips,
+        "stop_times": stop_times,
+        "calendar": cal,
+        "calendar_dates": dates,
+    }
+
+
+def read_gtfs(path):
+    p = Path(path)
+    if p.is_file() and zipfile.is_zipfile(p):
+        with tempfile.TemporaryDirectory(prefix="gtfs-") as temp_dir:
+            root = Path(temp_dir)
+            with zipfile.ZipFile(p) as archive:
+                extract_gtfs(archive, root)
+            return read_gtfs_dir(root)
+    return read_gtfs_dir(p)
+
+
+def read_gtfs_bytes(data: bytes):
+    """Parse downloaded GTFS bytes without reopening an output pathname."""
+
+    with tempfile.TemporaryDirectory(prefix="gtfs-") as temp_dir:
+        root = Path(temp_dir)
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            extract_gtfs(archive, root)
+        return read_gtfs_dir(root)
+
+
+def main():
+    os.umask(0o077)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--gtfs")
+    ap.add_argument("--feed-url")
+    ap.add_argument("--date", default="")
+    ap.add_argument("--stop-search", default="")
+    ap.add_argument("--route-search", default="")
+    ap.add_argument("--outdir", default="")
+    args = ap.parse_args()
+    src = args.gtfs
+    try:
+        binding = load_canonical_compiled_scope(ROOT)
+    except (OSError, RuntimeError, ValueError):
+        print("invalid transit source scope or network configuration", file=sys.stderr)
+        return 2
+    scope = binding.scope
+    transport = None
+    network_metadata = None
+    if args.feed_url:
+        try:
+            _ = download_limit(scope)
+            if not check_url(scope, args.feed_url).allowed:
+                raise RuntimeError("transit source URL is outside declared scope")
+            network_policy = transit_network_policy(scope)
+            binding = verify_scope_binding(binding)
+            scope = binding.scope
+            transport = network_policy.scoped_transport(scope)
+            # Refuse an unavailable selected proxy before DNS, a socket, or
+            # evidence-directory allocation. ``download_feed`` reuses this
+            # endpoint-aware transport so each redirect is pinned separately.
+            transport.preflight_url(args.feed_url)
+            network_metadata = network_policy.metadata()
+        except (EnvironmentPolicyError, RuntimeError, ValueError):
+            print("invalid transit source scope or network configuration", file=sys.stderr)
+            return 2
+    try:
+        binding = verify_scope_binding(binding)
+        outdir = _create_output_directory(args.outdir, binding=binding)
+    except (OSError, ValueError, RuntimeError):
+        print("invalid transit output directory", file=sys.stderr)
+        return 2
+    try:
+        if args.feed_url:
+            try:
+                binding = verify_scope_binding(binding)
+                scope = binding.scope
+                transport = network_policy.scoped_transport(scope)
+                transport.preflight_url(args.feed_url)
+                downloaded = download_feed(
+                    args.feed_url,
+                    outdir,
+                    download_limit(scope),
+                    scope=scope,
+                    transport=transport,
+                    binding=binding,
+                )
+            except (RuntimeError, ValueError) as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+            src = str(outdir.path / "feed.zip")
+            data = read_gtfs_bytes(downloaded)
+        if not src:
+            raise SystemExit("use --gtfs path-or-zip or --feed-url")
+        if not args.feed_url:
+            data = read_gtfs(src)
+        rec = {
+            "created_at": iso(),
+            "source": src,
+            "network_environment": network_metadata,
+            "date": args.date,
+            "counts": {k: len(v) for k, v in data.items()},
+            "matches": {},
+        }
+        if args.stop_search:
+            pat = re.compile(args.stop_search, re.I)
+            rec["matches"]["stops"] = [
+                s for s in data["stops"] if pat.search(json.dumps(s, ensure_ascii=False))
+            ][:200]
+        if args.route_search:
+            pat = re.compile(args.route_search, re.I)
+            rec["matches"]["routes"] = [
+                r for r in data["routes"] if pat.search(json.dumps(r, ensure_ascii=False))
+            ][:200]
+        rec["calendar_sample"] = data["calendar"][:20]
+        rec["exceptions_sample"] = data["calendar_dates"][:50]
+        outdir.write_json("transit_source.json", rec, binding=binding)
+        outdir.write_text(
+            "summary.md",
+            "# Transit Source Summary\n\n"
+            + json.dumps(rec["counts"], indent=2)
+            + "\n\nData is ranking evidence only. Pin validity windows and verify with an independent source before proposing a flag.\n",
+            binding=binding,
+        )
+        print(outdir.path)
+        return 0
+    except (OSError, RuntimeError, ValueError):
+        print("transit source could not be completed", file=sys.stderr)
+        return 2
+    finally:
+        outdir.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

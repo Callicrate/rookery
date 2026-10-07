@@ -1,0 +1,30 @@
+#!/usr/bin/env -S python3 -I -B
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+SOURCE_ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path.cwd()
+sys.path.insert(0, str(SOURCE_ROOT / "lib"))
+
+from rookery.portable.compat import execute_plan_alias  # noqa: E402
+from rookery.portable.optional_helper import require_bound_runtime_workspace  # noqa: E402
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Execute an authorized canonical Immersive scoring plan.")
+    parser.add_argument("plan_id")
+    args = parser.parse_args()
+    require_bound_runtime_workspace(ROOT)
+    return execute_plan_alias(
+        ROOT,
+        args.plan_id,
+        allowed_actions={"free_text", "multi_objective"},
+        adapter_id="immersive",
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

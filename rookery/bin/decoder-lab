@@ -1,0 +1,195 @@
+#!/usr/bin/env -S python3 -I -B
+"""Small optional decoder/verifier bench for uncommon CTF encodings."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import zipfile
+from pathlib import Path
+
+
+def rot47(s):
+    out = []
+    for c in s:
+        o = ord(c)
+        if 33 <= o <= 126:
+            out.append(chr(33 + ((o - 33 + 47) % 94)))
+        else:
+            out.append(c)
+    return "".join(out)
+
+
+def ebcdic_decode(data, codec="cp037"):
+    return data.decode(codec, errors="replace")
+
+
+def base91_decode(s):
+    tbl = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{|}~"'
+    dec = {c: i for i, c in enumerate(tbl)}
+    v = -1
+    b = 0
+    n = 0
+    out = bytearray()
+    for c in s:
+        if c not in dec:
+            continue
+        if v < 0:
+            v = dec[c]
+        else:
+            v += dec[c] * 91
+            b |= v << n
+            n += 13 if (v & 8191) > 88 else 14
+            while n > 7:
+                out.append(b & 255)
+                b >>= 8
+                n -= 8
+            v = -1
+    if v + 1:
+        out.append((b | v << n) & 255)
+    return bytes(out)
+
+
+def ihex(records):
+    mem = {}
+    upper = 0
+    for line in records.splitlines():
+        line = line.strip()
+        if not line.startswith(":") or len(line) < 11:
+            continue
+        raw = bytes.fromhex(line[1:])
+        count = raw[0]
+        addr = (raw[1] << 8) | raw[2]
+        typ = raw[3]
+        data = raw[4 : 4 + count]
+        if typ == 0:
+            for i, b in enumerate(data):
+                mem[upper + addr + i] = b
+        elif typ == 4:
+            upper = int.from_bytes(data, "big") << 16
+        elif typ == 1:
+            break
+    if not mem:
+        return b""
+    lo = min(mem)
+    hi = max(mem)
+    return bytes(mem.get(i, 0) for i in range(lo, hi + 1))
+
+
+def srec(records):
+    mem = {}
+    for line in records.splitlines():
+        line = line.strip()
+        if not line.startswith("S") or len(line) < 4:
+            continue
+        typ = line[1]
+        if typ not in "123":
+            continue
+        alen = {"1": 4, "2": 6, "3": 8}[typ]
+        addr = int(line[4 : 4 + alen], 16)
+        data_hex = line[4 + alen : -2]
+        data = bytes.fromhex(data_hex)
+        for i, b in enumerate(data):
+            mem[addr + i] = b
+    if not mem:
+        return b""
+    lo = min(mem)
+    hi = max(mem)
+    return bytes(mem.get(i, 0) for i in range(lo, hi + 1))
+
+
+def nested_archive(path):
+    p = Path(path)
+    rows = []
+    if zipfile.is_zipfile(p):
+        with zipfile.ZipFile(p) as z:
+            for i in z.infolist():
+                rows.append(
+                    {
+                        "name": i.filename,
+                        "size": i.file_size,
+                        "compressed": i.compress_size,
+                        "encrypted": bool(i.flag_bits & 1),
+                    }
+                )
+    return rows
+
+
+def read_input(args):
+    if args.max_bytes <= 0:
+        raise ValueError("input byte limit must be positive")
+    if args.file:
+        path = Path(args.file)
+        if path.stat().st_size > args.max_bytes:
+            raise ValueError("decoder input file exceeds configured byte limit")
+        return path.read_bytes()
+    data = sys.stdin.buffer.read(args.max_bytes + 1)
+    if len(data) > args.max_bytes:
+        raise ValueError("decoder stdin exceeds configured byte limit")
+    return data
+
+
+def printable(b):
+    try:
+        return b.decode("utf-8")
+    except Exception:
+        return b.decode("latin1", "replace")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    sub = ap.add_subparsers(dest="cmd")
+    for name in ["rot47", "ebcdic", "base91", "ihex", "srec", "base32768"]:
+        sp = sub.add_parser(name)
+        sp.add_argument("text", nargs="?")
+        sp.add_argument("-f", "--file")
+        sp.add_argument("--json", action="store_true")
+        sp.add_argument("--max-bytes", type=int, default=64 * 1024 * 1024)
+    na = sub.add_parser("nested-archive")
+    na.add_argument("file")
+    args = ap.parse_args()
+    if args.cmd == "nested-archive":
+        print(json.dumps(nested_archive(args.file), indent=2))
+        return 0
+    if not args.cmd:
+        print("decoders: rot47 ebcdic base91 ihex srec base32768 nested-archive")
+        return 0
+    raw = args.text.encode() if args.text is not None else read_input(args)
+    if args.cmd == "rot47":
+        out = rot47(raw.decode("utf-8", "replace")).encode()
+    elif args.cmd == "ebcdic":
+        out = ebcdic_decode(raw).encode()
+    elif args.cmd == "base91":
+        out = base91_decode(raw.decode("utf-8", "replace"))
+    elif args.cmd == "ihex":
+        out = ihex(raw.decode("utf-8", "replace"))
+    elif args.cmd == "srec":
+        out = srec(raw.decode("utf-8", "replace"))
+    elif args.cmd == "base32768":
+        try:
+            import base32768
+
+            out = base32768.decode(raw.decode("utf-8", "replace"))
+        except Exception as e:
+            print(
+                "base32768 module unavailable or decode failed: " + repr(e),
+                file=sys.stderr,
+            )
+            return 2
+    if args.json:
+        print(
+            json.dumps(
+                {"cmd": args.cmd, "bytes": len(out), "text": printable(out)},
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+    else:
+        sys.stdout.buffer.write(out)
+        sys.stdout.buffer.write(b"\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

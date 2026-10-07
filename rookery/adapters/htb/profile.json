@@ -1,0 +1,56 @@
+{
+  "adapter": {
+    "config": {
+      "inventory_command": "unknown",
+      "submit_command": "unknown",
+      "timeout": 60
+    },
+    "id": "htb"
+  },
+  "capabilities": {
+    "optional": [
+      "release_changes",
+      "session",
+      "network",
+      "collaboration"
+    ],
+    "required": [
+      "local_shell",
+      "platform_inventory",
+      "challenge_details",
+      "scoring"
+    ]
+  },
+  "profile": "htb",
+  "release": {
+    "model": "poll",
+    "poll_seconds": 60
+  },
+  "session": {
+    "dynamic_attempts": true,
+    "lifecycle": "platform-managed",
+    "required_freshness_seconds": 600
+  },
+  "scoring": {
+    "completion_mode": "scorer_truth",
+    "action_kinds": [
+      "flag",
+      "no_submit_evidence"
+    ]
+  },
+  "surface": {
+    "bundles": [
+      "core",
+      "research",
+      "scoring-review",
+      "writeups",
+      "unstick",
+      "adapter:htb"
+    ],
+    "categories": []
+  },
+  "queue": {
+    "cadence_seconds": 15,
+    "jitter_seconds": 5
+  }
+}

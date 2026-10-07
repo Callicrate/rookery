@@ -1,0 +1,72 @@
+[
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded koth review capability when the selected event surface requires advanced-scoring-review.",
+      "distinct_contract": "tool:koth-review",
+      "evidence": "Rookery optional implementation at extensions/koth/bin/koth-review; selected only by capability/profile registry fixtures."
+    },
+    "id": "koth-review",
+    "path": "extensions/koth/bin/koth-review",
+    "purpose": "koth review",
+    "requires_all": [],
+    "requires_any": [
+      "koth"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded verified write capability when the selected event surface requires legacy-optional.",
+      "distinct_contract": "tool:verified-write",
+      "evidence": "Rookery optional implementation at extensions/koth/bin/verified-write; selected only by capability/profile registry fixtures."
+    },
+    "id": "verified-write",
+    "path": "extensions/koth/bin/verified-write",
+    "purpose": "verified write",
+    "requires_all": [],
+    "requires_any": [
+      "koth"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded verified write linux capability when the selected event surface requires legacy-optional.",
+      "distinct_contract": "tool:verified-write-linux",
+      "evidence": "Rookery optional implementation at extensions/koth/bin/verified-write-linux; selected only by capability/profile registry fixtures."
+    },
+    "id": "verified-write-linux",
+    "path": "extensions/koth/bin/verified-write-linux",
+    "purpose": "verified write linux",
+    "requires_all": [],
+    "requires_any": [
+      "koth"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded verified write windows capability when the selected event surface requires legacy-optional.",
+      "distinct_contract": "tool:verified-write-windows",
+      "evidence": "Rookery optional implementation at extensions/koth/bin/verified-write-windows; selected only by capability/profile registry fixtures."
+    },
+    "id": "verified-write-windows",
+    "path": "extensions/koth/bin/verified-write-windows",
+    "purpose": "verified write windows",
+    "requires_all": [],
+    "requires_any": [
+      "koth"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded score correlate capability when the selected event surface requires advanced-scoring-review.",
+      "distinct_contract": "tool:score-correlate",
+      "evidence": "Rookery optional implementation at extensions/koth/bin/score-correlate; selected only by capability/profile registry fixtures."
+    },
+    "id": "score-correlate",
+    "path": "extensions/koth/bin/score-correlate",
+    "purpose": "score correlate",
+    "requires_all": [],
+    "requires_any": [
+      "koth"
+    ]
+  }
+]

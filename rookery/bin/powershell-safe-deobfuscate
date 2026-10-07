@@ -1,0 +1,247 @@
+#!/usr/bin/env -S python3 -I -B
+"""AST-lite PowerShell deobfuscation helper that never executes PowerShell.
+
+It extracts and evaluates only literal-safe constructs: format expressions,
+[char] codes, byte arrays, base64-like strings, ConvertTo-SecureString inputs,
+URLs, and obvious execution sinks. It does not invoke pwsh/powershell.
+"""
+
+from __future__ import annotations
+import argparse
+import base64
+import datetime as dt
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+UTC = dt.timezone.utc
+SCRIPT_ROOT = Path(__file__).resolve().parents[1]
+if str(SCRIPT_ROOT / "lib") not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+
+from rookery.portable.util import (  # noqa: E402
+    ensure_private_dir as _ensure_private_dir,
+    ensure_private_file as _ensure_private_file,
+)
+
+
+def iso():
+    return dt.datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def private_dir(p: Path):
+    _ensure_private_dir(p)
+
+
+def write_text(p: Path, text: str):
+    _ensure_private_dir(p.parent)
+    _ensure_private_file(p)
+    p.write_text(text, encoding="utf-8")
+    os.chmod(p, 0o600)
+
+
+SQ = r"'((?:''|[^'])*)'"
+DQ = r'"((?:`.|[^"`])*)"'
+STRING_RE = re.compile(SQ + "|" + DQ, re.S)
+FORMAT_RE = re.compile(
+    r"(?P<fmt>'(?:''|[^'])*'|\"(?:`.|[^\"`])*\")\s*-f\s*(?P<args>[^\r\n;]+)", re.I
+)
+CHAR_RE = re.compile(r"\[char\]\s*(?:0x([0-9a-fA-F]+)|(\d+))", re.I)
+BYTE_ARRAY_RE = re.compile(
+    r"(?:\[byte\[\]\])?\s*\(?\s*((?:0x[0-9a-fA-F]+|\d+)\s*(?:,\s*(?:0x[0-9a-fA-F]+|\d+)\s*){3,})\)?",
+    re.I,
+)
+SECURE_RE = re.compile(r"ConvertTo-SecureString\s+(?P<arg>[^\r\n|;]+)", re.I)
+SINK_RE = re.compile(
+    r"\b(iex|Invoke-Expression|Invoke-Command|Start-Process|New-Object\s+Net\.WebClient|DownloadString|DownloadFile|FromBase64String|VirtualAlloc|CreateThread|Reflection\.Assembly|Add-Type|Start-BitsTransfer|curl|wget|iwr|irm)\b",
+    re.I,
+)
+URL_RE = re.compile(r'https?://[^\s\'"<>]+', re.I)
+BASE64_RE = re.compile(
+    r"(?<![A-Za-z0-9+/=])([A-Za-z0-9+/]{24,}={0,2})(?![A-Za-z0-9+/=])"
+)
+
+
+def unquote_ps(s: str) -> str:
+    s = s.strip()
+    if len(s) >= 2 and s[0] == s[-1] == "'":
+        return s[1:-1].replace("''", "'")
+    if len(s) >= 2 and s[0] == s[-1] == '"':
+        inner = s[1:-1]
+        return re.sub(r"`(.)", r"\1", inner)
+    return s
+
+
+def split_args(s: str):
+    args = []
+    cur = ""
+    quote = None
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if quote:
+            cur += ch
+            if ch == quote:
+                if quote == "'" and i + 1 < len(s) and s[i + 1] == "'":
+                    cur += s[i + 1]
+                    i += 1
+                else:
+                    quote = None
+        else:
+            if ch in "'\"":
+                quote = ch
+                cur += ch
+            elif ch == ",":
+                if cur.strip():
+                    args.append(cur.strip())
+                cur = ""
+            else:
+                cur += ch
+        i += 1
+    if cur.strip():
+        args.append(cur.strip())
+    return [unquote_ps(x) for x in args]
+
+
+def eval_format(fmt: str, args_text: str):
+    fmt_val = unquote_ps(fmt)
+    vals = split_args(args_text)
+
+    def repl(m):
+        idx = int(m.group(1))
+        return vals[idx] if 0 <= idx < len(vals) else m.group(0)
+
+    return re.sub(r"\{(\d+)\}", repl, fmt_val)
+
+
+def decode_base64(s: str):
+    try:
+        raw = base64.b64decode(s + "=" * ((4 - len(s) % 4) % 4), validate=False)
+        if not raw:
+            return None
+        # Try common PowerShell encodings first.
+        for enc in ("utf-16le", "utf-8", "latin1"):
+            try:
+                text = raw.decode(enc)
+                printable = sum(
+                    1 for c in text if c.isprintable() or c in "\r\n\t"
+                ) / max(1, len(text))
+                if printable > 0.80:
+                    return {"encoding": enc, "text": text[:5000], "raw_len": len(raw)}
+            except Exception:
+                pass
+        return {"encoding": "bytes", "hex_prefix": raw[:128].hex(), "raw_len": len(raw)}
+    except Exception:
+        return None
+
+
+def main():
+    os.umask(0o077)
+    ap = argparse.ArgumentParser(
+        description="Safely extract literal-only PowerShell deobfuscation artifacts without executing code."
+    )
+    ap.add_argument(
+        "path", nargs="?", default="-", help="PowerShell file, or - for stdin"
+    )
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--out", default="")
+    ap.add_argument("--max-bytes", type=int, default=8 * 1024 * 1024)
+    args = ap.parse_args()
+    if args.max_bytes <= 0:
+        raise ValueError("input byte limit must be positive")
+    if args.path == "-":
+        raw = sys.stdin.buffer.read(args.max_bytes + 1)
+        if len(raw) > args.max_bytes:
+            raise ValueError("PowerShell stdin exceeds configured byte limit")
+        text = raw.decode("utf-8", errors="replace")
+    else:
+        source = Path(args.path)
+        if source.stat().st_size > args.max_bytes:
+            raise ValueError("PowerShell file exceeds configured byte limit")
+        text = source.read_text(errors="replace")
+    rec = {
+        "created_at": iso(),
+        "path": args.path,
+        "execution": "none",
+        "format_expressions": [],
+        "char_literals": [],
+        "byte_arrays": [],
+        "secure_string_inputs": [],
+        "urls": [],
+        "base64_candidates": [],
+        "execution_sinks": [],
+    }
+    for m in FORMAT_RE.finditer(text):
+        try:
+            val = eval_format(m.group("fmt"), m.group("args"))
+        except Exception as e:
+            val = f"<format-eval-error {e!r}>"
+        rec["format_expressions"].append(
+            {"span": [m.start(), m.end()], "source": m.group(0)[:1000], "value": val}
+        )
+    for m in CHAR_RE.finditer(text):
+        n = int(m.group(1), 16) if m.group(1) else int(m.group(2))
+        rec["char_literals"].append(
+            {
+                "span": [m.start(), m.end()],
+                "codepoint": n,
+                "char": chr(n) if 0 <= n <= 0x10FFFF else "",
+            }
+        )
+    for m in BYTE_ARRAY_RE.finditer(text):
+        nums = []
+        for x in re.findall(r"0x[0-9a-fA-F]+|\d+", m.group(1))[:4096]:
+            nums.append(int(x, 16) if x.lower().startswith("0x") else int(x))
+        bs = bytes([x & 0xFF for x in nums])
+        rec["byte_arrays"].append(
+            {
+                "span": [m.start(), m.end()],
+                "count": len(nums),
+                "sha256": __import__("hashlib").sha256(bs).hexdigest(),
+                "hex_prefix": bs[:128].hex(),
+                "ascii_preview": "".join(
+                    chr(b) if 32 <= b < 127 else "." for b in bs[:256]
+                ),
+            }
+        )
+    for m in SECURE_RE.finditer(text):
+        rec["secure_string_inputs"].append(
+            {
+                "span": [m.start(), m.end()],
+                "argument": m.group("arg")[:1000],
+                "strings": STRING_RE.findall(m.group("arg")[:1000]),
+            }
+        )
+    rec["urls"] = [
+        {"span": [m.start(), m.end()], "url": m.group(0)} for m in URL_RE.finditer(text)
+    ]
+    for m in BASE64_RE.finditer(text):
+        dec = decode_base64(m.group(1))
+        if dec:
+            rec["base64_candidates"].append(
+                {"span": [m.start(), m.end()], "value": m.group(1), "decoded": dec}
+            )
+    rec["execution_sinks"] = [
+        {"span": [m.start(), m.end()], "sink": m.group(0)}
+        for m in SINK_RE.finditer(text)
+    ]
+    if args.out:
+        out = Path(args.out)
+        write_text(out, json.dumps(rec, indent=2, ensure_ascii=False) + "\n")
+    if args.json or args.out:
+        print(json.dumps(rec, indent=2, ensure_ascii=False))
+    else:
+        print(
+            f"format_expressions={len(rec['format_expressions'])} char_literals={len(rec['char_literals'])} byte_arrays={len(rec['byte_arrays'])} base64={len(rec['base64_candidates'])} sinks={len(rec['execution_sinks'])}"
+        )
+        for u in rec["urls"][:20]:
+            print("url:", u["url"])
+        for f in rec["format_expressions"][:10]:
+            print("format:", f["value"])
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

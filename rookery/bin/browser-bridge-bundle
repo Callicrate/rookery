@@ -1,0 +1,14 @@
+#!/usr/bin/env -S python3 -I -S -B
+"""Build a release-bound Windows browser bridge bundle."""
+from __future__ import annotations
+import sys
+from pathlib import Path
+
+if sys.version_info < (3, 11):
+    raise SystemExit(2)
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "lib"))
+from rookery.portable.browser_bridge_bundle import main  # noqa: E402
+
+if __name__ == "__main__":
+    raise SystemExit(main())

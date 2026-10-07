@@ -1,0 +1,338 @@
+#!/usr/bin/env -S python3 -I -B
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import json
+import os
+import stat
+import sys
+from collections.abc import Mapping
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any
+
+root = Path(__file__).resolve().parents[1]
+if str(root / "lib") not in sys.path:
+    sys.path.insert(0, str(root / "lib"))
+
+# ruff: noqa: E402
+from rookery.portable.adapters import run_bounded_argv
+from rookery.portable.environment import minimal_child_environment
+from rookery.portable.outcomes import parse_report_handoff
+
+MAX_REPORTS = 256
+ACTIVE_AGENT_STATES = frozenset({"assigned", "running", "stopping"})
+HANDOFF_LABELS = (
+    "Status",
+    "Source handoff",
+    "Source report SHA-256",
+    "Observed result",
+    "Route key",
+    "Proof gap",
+    "Discriminating test",
+    "Next step or return trigger",
+    "Evidence paths",
+    "Command/artifact paths",
+    "Blocker",
+    "Cleanup/jobs",
+)
+
+
+class HarvestDebt(ValueError):
+    """A compact, value-free reason a report cannot become a handoff."""
+
+
+def debt(code: str) -> HarvestDebt:
+    return HarvestDebt(code)
+
+
+def report_glob(value: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.startswith("analysis/")
+        or not value.endswith("/REPORT.md")
+        or len(value.encode("utf-8")) > 256
+        or "\\" in value
+        or "\x00" in value
+        or ".." in PurePosixPath(value).parts
+    ):
+        raise argparse.ArgumentTypeError("glob must be an analysis-relative REPORT.md pattern")
+    return value
+
+
+def relative_report_path(path: Path) -> str:
+    try:
+        relative = path.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise debt("report_path_invalid") from exc
+    parts = PurePosixPath(relative).parts
+    if (
+        len(parts) < 3
+        or parts[0] != "analysis"
+        or parts[-1] != "REPORT.md"
+        or ".." in parts
+        or PureWindowsPath(relative).is_absolute()
+    ):
+        raise debt("report_path_invalid")
+    current = root
+    try:
+        for component in parts[:-1]:
+            current /= component
+            info = os.lstat(current)
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise debt("report_path_invalid")
+    except HarvestDebt:
+        raise
+    except OSError as exc:
+        raise debt("report_path_invalid") from exc
+    return relative
+
+
+def canonical_handoff(report_path: str) -> dict[str, Any]:
+    """Use the shared pure parser so wrapper and core accept one contract."""
+
+    try:
+        parsed = parse_report_handoff(root, report_path)
+    except (OSError, ValueError) as exc:
+        raise debt("handoff_contract_invalid") from exc
+    if not isinstance(parsed, dict) or parsed.get("report_path") != report_path:
+        raise debt("handoff_contract_invalid")
+    return parsed
+
+
+def run_command(argv: list[str], environment) -> Any:
+    return run_bounded_argv(
+        argv,
+        cwd=root,
+        timeout=60,
+        max_output_bytes=256 * 1024,
+        env=environment,
+    )
+
+
+def active_registrations(environment) -> Mapping[str, Mapping[str, Any]]:
+    result = run_command([str(root / "bin/rookery"), "agent", "list"], environment)
+    if result.returncode != 0 or result.termination != "exited":
+        raise debt("registration_query_failed")
+    try:
+        rows = json.loads(result.stdout.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise debt("registration_query_invalid") from exc
+    if not isinstance(rows, Mapping) or len(rows) > MAX_REPORTS:
+        raise debt("registration_query_invalid")
+    if any(not isinstance(key, str) or not isinstance(value, Mapping) for key, value in rows.items()):
+        raise debt("registration_query_invalid")
+    return rows
+
+
+def matching_registration(
+    registrations: Mapping[str, Mapping[str, Any]], report_path: str, handoff: Mapping[str, Any]
+) -> dict[str, str]:
+    matches: list[dict[str, str]] = []
+    for agent_id, registration in registrations.items():
+        if (
+            registration.get("status") not in ACTIVE_AGENT_STATES
+            or registration.get("report_path") != report_path
+            or registration.get("agent_id") != agent_id
+        ):
+            continue
+        attempt_id = registration.get("agent_attempt_id")
+        objective_id = registration.get("objective_id")
+        challenge_id = registration.get("challenge_id")
+        event_wide = registration.get("event_wide")
+        if not all(isinstance(item, str) and item for item in (agent_id, attempt_id, objective_id)):
+            continue
+        if not isinstance(challenge_id, str) or not isinstance(event_wide, bool) or bool(challenge_id) == event_wide:
+            continue
+        expected_source = str(registration.get("source_handoff_id") or "") or "none"
+        if handoff["source_handoff_id"] != expected_source:
+            raise debt("handoff_source_handoff_mismatch")
+        matches.append(
+            {
+                "agent_id": agent_id,
+                "agent_attempt_id": attempt_id,
+                "objective_id": objective_id,
+                "challenge_id": challenge_id,
+                "event_wide": "1" if event_wide else "0",
+            }
+        )
+    if not matches:
+        raise debt("registration_missing_or_inactive")
+    if len(matches) != 1:
+        raise debt("registration_ambiguous")
+    return matches[0]
+
+
+def verified_integration(
+    result: Any, report_path: str, registration: Mapping[str, str]
+) -> str | None:
+    if result.returncode != 0 or result.termination != "exited":
+        return None
+    try:
+        payload = json.loads(result.stdout.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, Mapping) or any(
+        payload.get(key) != registration[field]
+        for key, field in (
+            ("agent_id", "agent_id"),
+            ("agent_attempt_id", "agent_attempt_id"),
+            ("objective_id", "objective_id"),
+        )
+    ) or payload.get("report_path") != report_path:
+        return None
+    if registration["event_wide"] == "1":
+        valid = payload.get("structured") is False
+    else:
+        valid = payload.get("structured") is True and bool(payload.get("handoff_id"))
+    if not valid:
+        return None
+    return "already_integrated" if payload.get("idempotent") is True else "integrated"
+
+
+def safe_path(path: Path) -> str:
+    try:
+        return relative_report_path(path)
+    except HarvestDebt:
+        return "invalid_report_path"
+
+
+def active_report_paths(
+    registrations: Mapping[str, Mapping[str, Any]], pattern: str
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Select only reports claimed by current active registrations.
+
+    Historical reports remain evidence, but repeated default harvests must not
+    reclassify closed work as fresh integration debt.
+    """
+
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    debt_rows: list[dict[str, str]] = []
+    for agent_id, registration in registrations.items():
+        if registration.get("status") not in ACTIVE_AGENT_STATES:
+            continue
+        report_path = registration.get("report_path")
+        if not isinstance(report_path, str) or not report_path:
+            debt_rows.append(
+                {"path": "invalid_report_path", "status": "needs_harvest", "reason": "registration_invalid"}
+            )
+            continue
+        if not fnmatch.fnmatchcase(report_path, pattern):
+            continue
+        try:
+            relative_report_path(root / PurePosixPath(report_path))
+        except HarvestDebt:
+            debt_rows.append(
+                {"path": "invalid_report_path", "status": "needs_harvest", "reason": "registration_invalid"}
+            )
+            continue
+        grouped.setdefault(report_path, []).append(registration)
+    paths: list[str] = []
+    for report_path, owners in sorted(grouped.items()):
+        if len(owners) != 1:
+            debt_rows.append(
+                {"path": report_path, "status": "needs_harvest", "reason": "registration_ambiguous"}
+            )
+        else:
+            paths.append(report_path)
+    return paths, debt_rows
+
+
+def guide() -> dict[str, Any]:
+    return {
+        "status": "guide",
+        "identity": "derived_from_one_exact_active_registration",
+        "handoff_labels": list(HANDOFF_LABELS),
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--glob", type=report_glob, default="analysis/**/REPORT.md")
+    parser.add_argument("--generate", action="store_true")
+    args = parser.parse_args()
+    if args.generate:
+        print(json.dumps(guide(), indent=2))
+        return 0
+    environment = minimal_child_environment(root, policy_name="agent-harvest")
+    try:
+        registrations = active_registrations(environment)
+    except HarvestDebt as exc:
+        print(
+            json.dumps(
+                {
+                    "status": "needs_harvest",
+                    "integrated": [],
+                    "debt": [
+                        {"path": "active_registrations", "status": "needs_harvest", "reason": str(exc)}
+                    ],
+                    "count": 1,
+                    "environment": environment.metadata()["environment"],
+                },
+                indent=2,
+            )
+        )
+        return 1
+    paths, rows = active_report_paths(registrations, args.glob)
+    if len(paths) > MAX_REPORTS:
+        print(json.dumps({"status": "needs_harvest", "reason": "report_limit_exceeded"}, indent=2))
+        return 1
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    for report_path in paths:
+        try:
+            candidates.append((report_path, canonical_handoff(report_path)))
+        except HarvestDebt as exc:
+            rows.append({"path": report_path, "status": "needs_harvest", "reason": str(exc)})
+    for report_path, handoff in candidates:
+        try:
+            registration = matching_registration(registrations, report_path, handoff)
+            command = [
+                str(root / "bin/rookery"), "agent", "integrate", report_path,
+                "--agent-id", registration["agent_id"],
+                "--agent-attempt-id", registration["agent_attempt_id"],
+                "--objective-id", registration["objective_id"],
+            ]
+            if registration["event_wide"] == "1":
+                command.append("--event-wide")
+            else:
+                command.extend(("--challenge-id", registration["challenge_id"]))
+            command.extend((
+                "--status", handoff["status"],
+                "--observed-result", handoff["observed_result"],
+                "--route-key", handoff["route_key"],
+                "--proof-gap", handoff["proof_gap"],
+                "--next-step-or-return-trigger", handoff["next_step_or_return_trigger"],
+            ))
+            result = run_command(command, environment)
+            verified = verified_integration(result, report_path, registration)
+            rows.append({
+                "path": report_path,
+                "status": verified or "needs_harvest",
+                "reason": "" if verified else "integration_unverified",
+            })
+        except (HarvestDebt, OSError, RuntimeError, ValueError) as exc:
+            rows.append({"path": report_path, "status": "needs_harvest", "reason": str(exc) if isinstance(exc, HarvestDebt) else "integration_launch_failed"})
+    debt_rows = [
+        row for row in rows if row["status"] not in {"integrated", "already_integrated"}
+    ]
+    print(
+        json.dumps(
+            {
+                "status": "ok" if not debt_rows else "needs_harvest",
+                "integrated": [
+                    row
+                    for row in rows
+                    if row["status"] in {"integrated", "already_integrated"}
+                ],
+                "debt": debt_rows,
+                "count": len(rows),
+                "environment": environment.metadata()["environment"],
+            },
+            indent=2,
+        )
+    )
+    return 0 if not debt_rows else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

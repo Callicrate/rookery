@@ -1,0 +1,48 @@
+#!/usr/bin/env -S python3 -I -S -B
+"""Export one private, prelaunch policy for the loopback browser gateway."""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+from pathlib import Path
+
+
+if sys.version_info < (3, 11):
+    raise SystemExit(2)
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "lib"))
+
+from rookery.portable.browser_gateway_policy import (  # noqa: E402
+    BrowserGatewayPolicyError,
+    export_browser_gateway_policy,
+)
+
+
+LOGGER = logging.getLogger("rookery.browser_gateway_policy")
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Export a gateway policy without starting Rookery or contacting CDP."""
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--origin", required=True)
+    parser.add_argument("--output", required=True, type=Path)
+    arguments = parser.parse_args(argv)
+    try:
+        export_browser_gateway_policy(
+            ROOT,
+            origin=arguments.origin,
+            output=arguments.output,
+        )
+    except BrowserGatewayPolicyError as exc:
+        LOGGER.error("%s", exc)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

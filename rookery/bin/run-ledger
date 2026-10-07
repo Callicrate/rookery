@@ -1,0 +1,201 @@
+#!/usr/bin/env -S python3 -I -B
+"""Deduplicate noisy recon/search commands, then optionally run them through runq."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import hashlib
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+ROOT = Path.cwd()
+UTC = dt.timezone.utc
+SCRIPT_ROOT = Path(__file__).resolve().parents[1]
+if str(SCRIPT_ROOT / "lib") not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+
+from rookery.portable.environment import (
+    EnvironmentPolicyError,
+    minimal_child_environment,
+    validate_environment_name,
+)
+from rookery.portable.util import (
+    ensure_private_dir as _ensure_private_dir,
+)
+from rookery.portable.util import (
+    ensure_private_file as _ensure_private_file,
+)
+
+
+def iso() -> str:
+    return dt.datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def mkdir(p: Path) -> None:
+    _ensure_private_dir(p)
+
+
+def append(p: Path, obj: dict[str, Any]) -> None:
+    _ensure_private_dir(p.parent)
+    _ensure_private_file(p)
+    with p.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False, sort_keys=True) + "\n")
+    os.chmod(p, 0o600)
+
+
+def rows(p: Path) -> list[dict[str, Any]]:
+    if not p.exists():
+        return []
+    out = []
+    for line in p.read_text(errors="replace").splitlines():
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            pass
+    return out
+
+
+def norm(s: str) -> str:
+    return re.sub(
+        r"\s+", " ", re.sub(r"(/[A-Za-z0-9_.-]+)+", " <path> ", s.lower())
+    ).strip()
+
+
+RUNQ_ENVIRONMENT_POLICIES = frozenset(
+    {"network-client", "interactive-desktop", "ssh-agent"}
+)
+
+
+def _validate_runq_environment_request(args: argparse.Namespace) -> None:
+    """Validate forwarding flags without resolving or copying their values."""
+
+    passed = tuple(args.pass_env or ())
+    policies = tuple(args.env_policy or ())
+    if len(set(passed)) != len(passed):
+        raise EnvironmentPolicyError("duplicate run environment key")
+    if len(set(policies)) != len(policies):
+        raise EnvironmentPolicyError("duplicate run environment policy")
+    for name in passed:
+        validate_environment_name(name, label="run environment key")
+        if name == "ROOKERY_OWNER_TOKEN":
+            raise EnvironmentPolicyError("owner token cannot be explicitly passed")
+    for policy in policies:
+        if policy not in RUNQ_ENVIRONMENT_POLICIES:
+            raise EnvironmentPolicyError(f"unknown run environment policy: {policy}")
+
+
+def main() -> int:
+    os.umask(0o077)
+    ap = argparse.ArgumentParser(
+        description="Ledger and dedupe recon commands. Use -- to separate command."
+    )
+    ap.add_argument("scope")
+    ap.add_argument("-l", "--label", default="recon")
+    ap.add_argument("-t", "--timeout", type=int, default=60)
+    ap.add_argument("--force", action="store_true")
+    ap.add_argument("--no-run", action="store_true")
+    ap.add_argument("--pass-env", action="append", default=[])
+    ap.add_argument("--env-policy", action="append", default=[])
+    raw_argv = sys.argv[1:]
+    try:
+        separator = raw_argv.index("--")
+    except ValueError:
+        separator = -1
+    if separator < 0:
+        # Legacy invocations accepted a remainder without the delimiter. Keep
+        # that argv form while preferring ``--`` whenever child flags could be
+        # confused with ledger or environment-policy controls.
+        args, command = ap.parse_known_args(raw_argv)
+    else:
+        args = ap.parse_args(raw_argv[:separator])
+        command = raw_argv[separator + 1 :]
+    if not command:
+        print("missing command after --", file=sys.stderr)
+        return 2
+    try:
+        _validate_runq_environment_request(args)
+        # The ledger carries no delegated values. runq resolves only its own
+        # explicit declarations from its controlled sources.
+        environment = minimal_child_environment(ROOT, policy_name="run-ledger")
+    except EnvironmentPolicyError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    cmd = shlex.join(command)
+    fam = hashlib.sha256((args.scope + "\0" + norm(cmd)).encode()).hexdigest()[:16]
+    p = ROOT / "research/run-ledger.jsonl"
+    mkdir(p.parent)
+    _ensure_private_file(p)
+    prior = [r for r in rows(p) if r.get("family") == fam]
+    rec = {
+        "created_at": iso(),
+        "scope": args.scope,
+        "command": cmd,
+        "normalized": norm(cmd),
+        "family": fam,
+        "label": args.label,
+        "prior_count": len(prior),
+        "ran": False,
+        "environment": environment.metadata()["environment"],
+    }
+    if prior and not args.force:
+        rec.update(
+            {
+                "blocked": True,
+                "reason": "duplicate normalized command family",
+            }
+        )
+        append(p, rec)
+        print(json.dumps(rec, indent=2))
+        print(
+            f"blocked: similar recon command seen {len(prior)} time(s); use --force or change scope/command",
+            file=sys.stderr,
+        )
+        return 3
+    if args.no_run:
+        append(p, rec)
+        print(json.dumps(rec, indent=2))
+        return 0
+    runq_argv = [
+        str(ROOT / "bin/runq"),
+        "-t",
+        str(args.timeout),
+        "-l",
+        args.label,
+    ]
+    for name in args.pass_env:
+        runq_argv.extend(("--pass-env", name))
+    for policy in args.env_policy:
+        runq_argv.extend(("--env-policy", policy))
+    runq_argv.extend(("--", *command))
+    cp = subprocess.run(
+        runq_argv,
+        cwd=ROOT,
+        env=environment.values,
+        text=True,
+        capture_output=True,
+        timeout=max(1, args.timeout) + 10,
+        check=False,
+    )
+    rec.update(
+        {
+            "ran": True,
+            "returncode": cp.returncode,
+            "stdout": cp.stdout[-2000:],
+            "stderr": cp.stderr[-2000:],
+        }
+    )
+    append(p, rec)
+    sys.stdout.write(cp.stdout)
+    sys.stderr.write(cp.stderr)
+    return cp.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

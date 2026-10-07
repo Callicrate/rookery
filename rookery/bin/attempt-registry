@@ -1,0 +1,416 @@
+#!/usr/bin/env -S python3 -I -B
+"""Live attempt registry for dynamic CTF/lab platforms.
+
+Binds challenge/activity/attempt/cluster/question IDs to answer values and platform
+state so old accepted answers are not confused with fresh attempts.
+"""
+
+from __future__ import annotations
+import argparse
+import contextlib
+import datetime as dt
+import fcntl
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path.cwd()
+UTC = dt.timezone.utc
+
+
+def iso():
+    return dt.datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def stamp():
+    return dt.datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _private_error(path: Path) -> ValueError:
+    return ValueError(f"private path must be a regular non-symlink path: {path}")
+
+
+def mkdir(p: Path) -> Path:
+    path = Path(os.path.abspath(os.fspath(p)))
+    workspace = Path(os.path.abspath(os.fspath(ROOT)))
+    try:
+        relative = path.relative_to(workspace)
+    except ValueError:
+        missing = []
+        current = path
+        while not os.path.lexists(current):
+            missing.append(current)
+            if current.parent == current:
+                raise _private_error(path)
+            current = current.parent
+        state = os.lstat(current)
+        if stat.S_ISLNK(state.st_mode) or not stat.S_ISDIR(state.st_mode):
+            raise _private_error(current)
+        for current in reversed(missing):
+            os.mkdir(current, 0o700)
+            os.chmod(current, 0o700)
+        os.chmod(path, 0o700)
+        return path
+    current = workspace
+    for part in relative.parts:
+        current /= part
+        if os.path.lexists(current):
+            state = os.lstat(current)
+            if stat.S_ISLNK(state.st_mode) or not stat.S_ISDIR(state.st_mode):
+                raise _private_error(current)
+        else:
+            os.mkdir(current, 0o700)
+        os.chmod(current, 0o700)
+    return path
+
+
+def private_file(p: Path) -> bool:
+    path = Path(p)
+    mkdir(path.parent)
+    if not os.path.lexists(path):
+        return False
+    state = os.lstat(path)
+    if stat.S_ISLNK(state.st_mode) or not stat.S_ISREG(state.st_mode):
+        raise _private_error(path)
+    os.chmod(path, 0o600)
+    return True
+
+
+@contextlib.contextmanager
+def private_lock(p: Path):
+    path = Path(p)
+    lock = path.with_name(f".{path.name}.lock")
+    private_file(lock)
+    descriptor = os.open(
+        lock,
+        os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        state = os.fstat(descriptor)
+        if not stat.S_ISREG(state.st_mode):
+            raise _private_error(lock)
+        os.chmod(lock, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def write_private_text(p: Path, text: str) -> None:
+    path = Path(p)
+    private_file(path)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        private_file(path)
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def append_private_jsonl(p: Path, obj) -> None:
+    path = Path(p)
+    row = json.dumps(obj, ensure_ascii=False, sort_keys=True) + "\n"
+    with private_lock(path):
+        private_file(path)
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            state = os.fstat(descriptor)
+            if not stat.S_ISREG(state.st_mode):
+                raise _private_error(path)
+            os.chmod(path, 0o600)
+            data = row.encode("utf-8")
+            written = 0
+            while written < len(data):
+                written += os.write(descriptor, data[written:])
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def safe(s):
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(s))[:120] or "item"
+
+
+def jread(p: Path, default):
+    try:
+        private_file(p)
+        return json.loads(p.read_text(errors="replace"))
+    except Exception:
+        return default
+
+
+def jwrite(p: Path, obj):
+    write_private_text(
+        p,
+        json.dumps(obj, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+    )
+
+
+def append_jsonl(p: Path, obj):
+    append_private_jsonl(p, obj)
+
+
+def read_jsonl(p: Path):
+    if not os.path.lexists(p):
+        return []
+    private_file(p)
+    out = []
+    for line in p.read_text(errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            out.append({"raw": line})
+    return out
+
+
+def answer_hash(v):
+    return (
+        hashlib.sha256(str(v).encode("utf-8", "surrogatepass")).hexdigest()
+        if v is not None
+        else ""
+    )
+
+
+def attempt_key(
+    challenge, activity_id="", attempt_id="", cluster_id="", question_id=""
+):
+    parts = [
+        str(challenge or ""),
+        str(activity_id or ""),
+        str(attempt_id or ""),
+        str(cluster_id or ""),
+        str(question_id or ""),
+    ]
+    return hashlib.sha256("\0".join(parts).encode()).hexdigest()[:16]
+
+
+def state_paths():
+    return ROOT / "state/attempt_registry.jsonl", ROOT / "state/attempts/current.json"
+
+
+def upsert_current(rec):
+    _, curp = state_paths()
+    cid = str(rec.get("challenge") or "global")
+    with private_lock(curp):
+        cur = jread(curp, {})
+        cur.setdefault("by_challenge", {})[cid] = rec
+        cur["updated_at"] = iso()
+        jwrite(curp, cur)
+    cpath = ROOT / "state/challenges" / f"{safe(cid)}.json"
+    with private_lock(cpath):
+        c = jread(cpath, {"id": cid})
+        c["current_attempt"] = rec
+        c["updated_at"] = iso()
+        jwrite(cpath, c)
+
+
+def emit(rec):
+    log, _ = state_paths()
+    append_jsonl(log, rec)
+    upsert_current(rec)
+
+
+def base_from_args(args):
+    rec = {
+        "created_at": iso(),
+        "challenge": str(args.challenge),
+        "activity_id": args.activity_id,
+        "attempt_id": args.attempt_id,
+        "cluster_id": args.cluster_id,
+        "question_id": args.question_id,
+        "state": args.state,
+        "source": args.source,
+        "notes": args.notes,
+    }
+    rec["attempt_key"] = attempt_key(
+        rec["challenge"],
+        rec["activity_id"],
+        rec["attempt_id"],
+        rec["cluster_id"],
+        rec["question_id"],
+    )
+    return rec
+
+
+def cmd_register(args):
+    rec = base_from_args(args)
+    rec["event"] = "attempt-register"
+    emit(rec)
+    print(json.dumps(rec, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_answer(args):
+    rec = base_from_args(args)
+    rec.update(
+        {
+            "event": "answer-state",
+            "answer_value": args.value,
+            "answer_hash": answer_hash(args.value),
+            "proposal_id": args.proposal_id,
+            "response_path": args.response_path,
+            "verdict": args.verdict or args.state,
+        }
+    )
+    emit(rec)
+    # Also append to challenge-local dynamic answers for easy review.
+    cpath = ROOT / "state/challenges" / f"{safe(args.challenge)}.json"
+    with private_lock(cpath):
+        c = jread(cpath, {"id": str(args.challenge)})
+        c.setdefault("dynamic_answers", []).append(
+            {
+                k: rec.get(k)
+                for k in [
+                    "created_at",
+                    "attempt_key",
+                    "activity_id",
+                    "attempt_id",
+                    "cluster_id",
+                    "question_id",
+                    "state",
+                    "verdict",
+                    "answer_value",
+                    "answer_hash",
+                    "proposal_id",
+                    "response_path",
+                    "source",
+                ]
+            }
+        )
+        c["updated_at"] = iso()
+        jwrite(cpath, c)
+    print(json.dumps(rec, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_list(args):
+    rows = read_jsonl(state_paths()[0])
+    if args.challenge:
+        rows = [r for r in rows if str(r.get("challenge")) == str(args.challenge)]
+    if args.json:
+        print(json.dumps(rows[-args.limit :], indent=2, ensure_ascii=False))
+    else:
+        for r in rows[-args.limit :]:
+            print(
+                f"{r.get('created_at')} ch={r.get('challenge')} state={r.get('state')} verdict={r.get('verdict', '')} activity={r.get('activity_id', '')} attempt={r.get('attempt_id', '')} cluster={r.get('cluster_id', '')} answer={r.get('answer_value', '')}"
+            )
+    return 0
+
+
+def cmd_current(args):
+    cur = jread(state_paths()[1], {})
+    if args.challenge:
+        out = (cur.get("by_challenge") or {}).get(str(args.challenge), {})
+    else:
+        out = cur
+    print(json.dumps(out, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_check(args):
+    cur = (jread(state_paths()[1], {}).get("by_challenge") or {}).get(
+        str(args.challenge), {}
+    )
+    if not cur:
+        print(f"no current attempt for challenge {args.challenge}", file=sys.stderr)
+        return 2
+    mism = []
+    for k in ["activity_id", "attempt_id", "cluster_id", "question_id"]:
+        v = getattr(args, k)
+        if v and str(cur.get(k, "")) != str(v):
+            mism.append(k)
+    if mism:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "reason": "attempt_mismatch",
+                    "mismatched_fields": mism,
+                    "current": cur,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 4
+    print(json.dumps({"ok": True, "current": cur}, indent=2, ensure_ascii=False))
+    return 0
+
+
+def main():
+    os.umask(0o077)
+    ap = argparse.ArgumentParser(
+        description="Track dynamic challenge attempts and bind answers to activity/attempt/cluster IDs."
+    )
+    sub = ap.add_subparsers(dest="cmd")
+
+    def common(p):
+        p.add_argument("--challenge", required=True)
+        p.add_argument("--activity-id", default="")
+        p.add_argument("--attempt-id", default="")
+        p.add_argument("--cluster-id", default="")
+        p.add_argument("--question-id", default="")
+        p.add_argument("--state", default="active")
+        p.add_argument("--source", default="manual")
+        p.add_argument("--notes", default="")
+
+    rg = sub.add_parser("register")
+    common(rg)
+    rg.set_defaults(func=cmd_register)
+    ans = sub.add_parser("answer")
+    common(ans)
+    ans.add_argument("--value", required=True)
+    ans.add_argument("--proposal-id", default="")
+    ans.add_argument("--response-path", default="")
+    ans.add_argument("--verdict", default="")
+    ans.set_defaults(func=cmd_answer)
+    ls = sub.add_parser("list")
+    ls.add_argument("--challenge", default="")
+    ls.add_argument("--limit", type=int, default=80)
+    ls.add_argument("--json", action="store_true")
+    ls.set_defaults(func=cmd_list)
+    cu = sub.add_parser("current")
+    cu.add_argument("--challenge", default="")
+    cu.set_defaults(func=cmd_current)
+    ck = sub.add_parser("check")
+    ck.add_argument("--challenge", required=True)
+    ck.add_argument("--activity-id", default="")
+    ck.add_argument("--attempt-id", default="")
+    ck.add_argument("--cluster-id", default="")
+    ck.add_argument("--question-id", default="")
+    ck.set_defaults(func=cmd_check)
+    args = ap.parse_args()
+    if not hasattr(args, "func"):
+        ap.print_help()
+        return 2
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

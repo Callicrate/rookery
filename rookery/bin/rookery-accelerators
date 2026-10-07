@@ -1,0 +1,2340 @@
+#!/usr/bin/env -S python3 -I -B
+"""Shell-first CTF accelerators.
+
+This file deliberately contains no event control, platform truth, scoring review,
+policy, stop, or queue state machine. Those live in rookery.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import hashlib
+import json
+import os
+import re
+import select
+import signal
+import sqlite3
+import stat
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+UTC = dt.timezone.utc
+STREAM_CHUNK_BYTES = 64 * 1024
+DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+DEFAULT_BACKGROUND_TIMEOUT_SECONDS = 24 * 60 * 60
+MAX_BACKGROUND_TIMEOUT_SECONDS = DEFAULT_BACKGROUND_TIMEOUT_SECONDS
+MAX_BACKGROUND_OUTPUT_BYTES = DEFAULT_MAX_OUTPUT_BYTES
+OUTPUT_LIMIT_EXIT_CODE = 125
+CAPTURE_ERROR_EXIT_CODE = 74
+TERMINATE_GRACE_SECONDS = 2.0
+PRIVATE_DIRECTORY_MODE = 0o700
+PRIVATE_FILE_MODE = 0o600
+sys.path.insert(0, str(ROOT / "lib"))
+sys.dont_write_bytecode = True
+from rookery.portable.control import (  # noqa: E402
+    process_identity_matches,
+    process_resource_snapshot,
+)
+from rookery.portable.environment import (  # noqa: E402
+    ChildEnvironment,
+    EnvClass,
+    EnvironmentPolicyError,
+    EnvKey,
+    EnvSource,
+    build_child_environment,
+    classify_environment_name,
+    purpose_policy,
+)
+from rookery.portable.store import EventStore  # noqa: E402
+from rookery.portable.scope import (  # noqa: E402
+    ScopeAuthorityError,
+    verify_canonical_compiled_scope_binding,
+    verified_canonical_scope_effect,
+)
+from rookery.portable.reducers import ACTIVE_JOB_STATES  # noqa: E402
+from rookery.portable.outcomes import parse_report_handoff  # noqa: E402
+from rookery.portable.util import (  # noqa: E402
+    atomic_write_json,
+    canonical_json,
+    ensure_private_dir,
+    ensure_private_file,
+    file_lock,
+    iso_now,
+    load_json,
+    sha256_bytes,
+    sha256_file,
+)
+
+
+def safe(s):
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(s))[:120] or "item"
+
+
+def _ensure_private_directory(path: Path) -> None:
+    """Create and validate each private directory component below ``ROOT``."""
+
+    try:
+        relative = path.relative_to(ROOT)
+    except ValueError as exc:
+        raise ValueError(f"private directory must be below Rookery root: {path}") from exc
+    if any(part in {".", ".."} for part in relative.parts):
+        raise ValueError(f"private directory must be lexically below Rookery root: {path}")
+    current = ROOT
+    for component in relative.parts:
+        current = current / component
+        ensure_private_dir(current)
+
+
+def _ensure_private_file(path: Path) -> None:
+    """Create a private file without modifying an existing artifact's bytes."""
+
+    _ensure_private_directory(path.parent)
+    ensure_private_file(path)
+
+
+def _open_private_capture_descriptor(path: Path) -> int:
+    """Open one regular private capture without trusting a pathname afterward."""
+
+    _ensure_private_file(path)
+    descriptor = os.open(
+        path,
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_APPEND
+        | os.O_NONBLOCK
+        | getattr(os, "O_NOFOLLOW", 0),
+        PRIVATE_FILE_MODE,
+    )
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(f"append path is not a regular file: {path}")
+        os.fchmod(descriptor, PRIVATE_FILE_MODE)
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _open_private_append(path: Path):
+    """Open an append-only evidence file privately before handing it to a child."""
+
+    return os.fdopen(_open_private_capture_descriptor(path), "ab")
+
+
+def _tighten_sqlite_artifacts(path: Path) -> None:
+    """Tighten SQLite files without rewriting its main database or sidecars."""
+
+    _ensure_private_file(path)
+    for artifact in (
+        path.with_name(path.name + "-wal"),
+        path.with_name(path.name + "-shm"),
+    ):
+        try:
+            descriptor = os.open(
+                artifact,
+                os.O_WRONLY
+                | os.O_NONBLOCK
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except FileNotFoundError:
+            continue
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise OSError(f"SQLite sidecar path is not a regular file: {artifact}")
+            os.fchmod(descriptor, PRIVATE_FILE_MODE)
+        finally:
+            os.close(descriptor)
+
+
+def append_jsonl(path, obj):
+    _ensure_private_directory(path.parent)
+    with _open_private_append(path) as handle:
+        handle.write(
+            (json.dumps(obj, sort_keys=True, ensure_ascii=False) + "\n").encode(
+                "utf-8"
+            )
+        )
+
+
+_RUN_ENVIRONMENT_POLICIES: dict[str, tuple[EnvKey, ...]] = {
+    "network-client": tuple(
+        EnvKey(name, EnvClass.PROXY_CREDENTIAL)
+        for name in (
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "no_proxy",
+        )
+    )
+    + tuple(
+        EnvKey(name, EnvClass.CA_TRUST_PATH)
+        for name in (
+            "CODEX_CA_CERTIFICATE",
+            "SSL_CERT_FILE",
+            "REQUESTS_CA_BUNDLE",
+            "CURL_CA_BUNDLE",
+            "NODE_EXTRA_CA_CERTS",
+            "GIT_SSL_CAINFO",
+        )
+    ),
+    "interactive-desktop": tuple(
+        EnvKey(name, EnvClass.AGENT_CAPABILITY)
+        for name in (
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "XAUTHORITY",
+            "DBUS_SESSION_BUS_ADDRESS",
+        )
+    ),
+    "ssh-agent": tuple(
+        EnvKey(name, EnvClass.AGENT_CAPABILITY)
+        for name in ("SSH_AUTH_SOCK", "SSH_AGENT_PID")
+    ),
+}
+
+_GENERIC_RUN_PASS_ENV_NAMES = frozenset(
+    {
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TERM",
+        "TZ",
+    }
+)
+
+
+def _run_child_environment(
+    args: argparse.Namespace,
+    *,
+    policy_name: str,
+    internal: dict[str, str] | None = None,
+) -> ChildEnvironment:
+    """Build the bounded runq/runbg environment before any runtime effect.
+
+    The three policy names are fixed in source.  They are deliberately not a
+    file-backed policy language, and ``build_child_environment`` remains the
+    only resolver and value/bounds validator.
+    """
+
+    # Generic caller-selected grants are an exact, source-reviewed set of
+    # display/locale settings. Every capability, configuration, or unknown
+    # name must instead be declared by a fixed source-owned purpose policy.
+    for name in tuple(getattr(args, "pass_env", ()) or ()):
+        classification = classify_environment_name(name)
+        if name not in _GENERIC_RUN_PASS_ENV_NAMES:
+            raise EnvironmentPolicyError(
+                "generic run environment forbids name "
+                f"{name} with class {classification.value}"
+            )
+    declarations: list[EnvKey] = []
+    selected: set[str] = set()
+    for requested in tuple(getattr(args, "env_policy", ()) or ()):
+        if requested in selected:
+            raise EnvironmentPolicyError(
+                f"duplicate run environment policy: {requested}"
+            )
+        try:
+            declarations.extend(_RUN_ENVIRONMENT_POLICIES[requested])
+        except KeyError as exc:
+            raise EnvironmentPolicyError(
+                f"unknown run environment policy: {requested}"
+            ) from exc
+        selected.add(requested)
+    if internal:
+        declarations.append(
+            EnvKey(
+                "ROOKERY_OWNER_TOKEN",
+                EnvClass.OWNER_TOKEN,
+                sources=(EnvSource.INTERNAL,),
+            )
+        )
+    return build_child_environment(
+        ROOT,
+        policy=purpose_policy(policy_name, declarations),
+        pass_names=tuple(getattr(args, "pass_env", ()) or ()),
+        internal=internal,
+    )
+
+
+def report_new(args):
+    path = (
+        ROOT
+        / "analysis"
+        / safe(args.category)
+        / f"{safe(args.objective)}-{safe(args.wave)}-{safe(args.topic)}"
+        / "REPORT.md"
+    )
+    _ensure_private_directory(path.parent)
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        created = True
+    else:
+        created = False
+    _ensure_private_file(path)
+    if created:
+        template = (ROOT / "templates" / "REPORT.md").read_text(encoding="utf-8")
+        path.write_text(
+            template
+            + "\n## Assignment\n\n"
+            + f"Objective: `{args.objective}`\n\n"
+            + f"Agent: `{args.agent_id or 'unassigned'}`\n\n"
+            + f"Scope: {args.scope}\n",
+            encoding="utf-8",
+        )
+    print(path.relative_to(ROOT))
+    return 0
+
+
+def report_lint(args):
+    errors = []
+    for raw in args.paths:
+        p = Path(raw)
+        p = p if p.is_absolute() else ROOT / p
+        if not p.exists():
+            errors.append(f"missing {raw}")
+            continue
+        try:
+            relative = p.relative_to(ROOT).as_posix()
+            parsed = parse_report_handoff(ROOT, relative)
+            text = p.read_text(encoding="utf-8")
+            if parsed.get("report_path") != relative:
+                raise ValueError("canonical report path mismatch")
+            for section in ("## Evidence", "## Commands"):
+                if section not in text:
+                    raise ValueError(f"missing {section}")
+        except (OSError, UnicodeError, ValueError) as exc:
+            errors.append(f"{raw}: {exc}")
+    print(json.dumps({"ok": not errors, "errors": errors}, indent=2))
+    return 0 if not errors else 1
+
+
+def evidence_add(args):
+    p = Path(args.path)
+    p = p if p.is_absolute() else ROOT / p
+    if not p.exists():
+        raise FileNotFoundError(p)
+    row = {
+        "evidence_id": "ev_" + uuid.uuid4().hex,
+        "objective_id": args.objective,
+        "path": str(p.relative_to(ROOT)),
+        "type": args.type,
+        "source_url": args.source_url,
+        "role": args.role,
+        "sha256": sha256_file(p),
+        "bytes": p.stat().st_size,
+        "recorded_at": iso_now(),
+    }
+    append_jsonl(ROOT / "evidence/index.jsonl", row)
+    print(json.dumps(row, indent=2))
+    return 0
+
+
+def query_ledger(args):
+    path = ROOT / "research/query-ledger.jsonl"
+    rows = []
+    if path.exists():
+        for line in path.read_text(errors="replace").splitlines():
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    if args.qcmd == "stats":
+        print(
+            json.dumps(
+                {
+                    "count": len(rows),
+                    "objectives": len({r.get("objective_id") for r in rows}),
+                },
+                indent=2,
+            )
+        )
+        return 0
+    family = re.sub(r"[^a-z0-9]+", " ", args.query.lower()).strip()
+    if not args.force and any(r.get("objective_id") == args.objective and r.get("family") == family for r in rows):
+        print(
+            json.dumps(
+                {
+                    "blocked": True,
+                    "reason": "duplicate normalized query family",
+                    "family": family,
+                },
+                indent=2,
+            )
+        )
+        return 3
+    query_environment = build_child_environment(
+        ROOT,
+        policy=purpose_policy("query-ledger"),
+    )
+    cp = subprocess.run(
+        [
+            str(ROOT / "bin/searxng"),
+            args.query,
+            "--top",
+            str(args.top),
+            "--categories",
+            args.categories,
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=45,
+        env=query_environment.values,
+        check=False,
+    )
+    result = {}
+    try:
+        result = json.loads(cp.stdout)
+    except json.JSONDecodeError:
+        result = {"stdout": cp.stdout, "stderr": cp.stderr, "returncode": cp.returncode}
+    row = {
+        "query_id": "query_" + uuid.uuid4().hex,
+        "objective_id": args.objective,
+        "family": family,
+        "query": args.query,
+        "categories": args.categories,
+        "created_at": iso_now(),
+        "result": result,
+    }
+    append_jsonl(path, row)
+    print(json.dumps(row, indent=2))
+    return cp.returncode
+
+
+def knowledge_db():
+    p = ROOT / "knowledge/ctf_knowledge.sqlite3"
+    _ensure_private_directory(p.parent)
+    _ensure_private_file(p)
+    con = sqlite3.connect(p)
+    con.execute("CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(path, title, body)")
+    _tighten_sqlite_artifacts(p)
+    return con
+
+
+def knowledge(args):
+    con = knowledge_db()
+    if args.kcmd == "ingest":
+        count = 0
+        for raw in args.paths:
+            p = Path(raw)
+            p = p if p.is_absolute() else ROOT / p
+            files = [p] if p.is_file() else [x for x in p.rglob("*") if x.is_file() and x.stat().st_size < 2_000_000]
+            for f in files:
+                try:
+                    body = f.read_text(errors="replace")
+                except OSError:
+                    continue
+                rel = str(f.relative_to(ROOT)) if f.is_relative_to(ROOT) else str(f)
+                con.execute("DELETE FROM docs WHERE path=?", (rel,))
+                con.execute(
+                    "INSERT INTO docs(path,title,body) VALUES(?,?,?)",
+                    (rel, f.stem, body),
+                )
+                count += 1
+        con.commit()
+        print(json.dumps({"ingested": count}, indent=2))
+    elif args.kcmd == "search":
+        rows = con.execute(
+            'SELECT path,title,snippet(docs,2,"[","]","...",20) FROM docs WHERE docs MATCH ? LIMIT ?',
+            (args.query, args.limit),
+        ).fetchall()
+        print(json.dumps([{"path": r[0], "title": r[1], "snippet": r[2]} for r in rows], indent=2))
+    else:
+        count = con.execute("SELECT count(*) FROM docs").fetchone()[0]
+        print(json.dumps({"documents": count}, indent=2))
+    try:
+        _tighten_sqlite_artifacts(ROOT / "knowledge/ctf_knowledge.sqlite3")
+    finally:
+        con.close()
+    return 0
+
+
+def digest_text(text):
+    lines = text.splitlines()
+    interesting = []
+    pat = re.compile(
+        r"(flag\{|ctf\{|error|fail|success|open|password|token|key|warning|traceback)",
+        re.IGNORECASE,
+    )
+    for i, line in enumerate(lines):
+        if pat.search(line):
+            interesting.append({"line": i + 1, "text": line[:500]})
+        if len(interesting) >= 80:
+            break
+    return {
+        "line_count": len(lines),
+        "byte_count": len(text.encode(errors="replace")),
+        "interesting": interesting,
+        "head": lines[:20],
+        "tail": lines[-20:],
+    }
+
+
+def digest(args):
+    if args.max_bytes <= 0:
+        raise ValueError("digest byte limit must be positive")
+    if args.path == "-":
+        raw = sys.stdin.buffer.read(args.max_bytes + 1)
+        if len(raw) > args.max_bytes:
+            raise ValueError("digest stdin exceeds configured byte limit")
+        text = raw.decode("utf-8", errors="replace")
+    else:
+        path = ROOT / args.path
+        if path.stat().st_size > args.max_bytes:
+            raise ValueError("digest file exceeds configured byte limit")
+        text = path.read_text(errors="replace")
+    out = digest_text(text)
+    print(
+        json.dumps(out, indent=2)
+        if args.json
+        else "\n".join(
+            [f"lines={out['line_count']} bytes={out['byte_count']}"]
+            + [f"{x['line']}: {x['text']}" for x in out["interesting"]]
+        )
+    )
+    return 0
+
+
+def command_meta(
+    *,
+    command_id: str,
+    label: str,
+    command: list[str],
+    start: str,
+    end: str,
+    elapsed_ms: int,
+    rc: int,
+    termination: str,
+    stdout_path: str,
+    stderr_path: str,
+    stdout_bytes: int,
+    stderr_bytes: int,
+    stdout_sha256: str,
+    stderr_sha256: str,
+    timeout: int,
+    mutation: bool,
+    attempt_id: str,
+    parent_attempt_id: str,
+    proposal_id: str,
+    plan_id: str,
+    max_output_bytes: int,
+    environment: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": "2",
+        "command_id": command_id,
+        "label": label,
+        "command": command,
+        "argv_sha256": sha256_bytes(canonical_json(command).encode("utf-8")),
+        "cwd": str(ROOT),
+        "started_at": start,
+        "ended_at": end,
+        "elapsed_ms": elapsed_ms,
+        "exit_code": rc,
+        "termination": termination,
+        "stdout_path": stdout_path,
+        "stderr_path": stderr_path,
+        "stdout_bytes": stdout_bytes,
+        "stderr_bytes": stderr_bytes,
+        "stdout_sha256": stdout_sha256,
+        "stderr_sha256": stderr_sha256,
+        "timeout_seconds": timeout,
+        "max_output_bytes": max_output_bytes,
+        "remote_mutation": mutation,
+        "attempt_id": attempt_id,
+        "parent_attempt_id": parent_attempt_id,
+        "proposal_id": proposal_id,
+        "plan_id": plan_id,
+        "environment": environment,
+        "complete": True,
+    }
+
+
+class OutputBudget:
+    """Share one capture budget between stdout and stderr reader threads."""
+
+    def __init__(self, maximum: int):
+        self.maximum = maximum
+        self.captured = 0
+        self.lock = threading.Lock()
+        self.output_limited = threading.Event()
+        self.capture_failed = threading.Event()
+        self.interrupted = threading.Event()
+
+    def reserve(self, requested: int) -> int:
+        """Reserve up to ``requested`` bytes without exceeding the combined cap."""
+
+        with self.lock:
+            remaining = self.maximum - self.captured
+            accepted = min(requested, max(0, remaining))
+            self.captured += accepted
+            if accepted < requested:
+                self.output_limited.set()
+                self.interrupted.set()
+            return accepted
+
+    def mark_capture_failed(self) -> None:
+        """Signal that a reader cannot safely keep draining a subprocess pipe."""
+
+        self.capture_failed.set()
+        self.interrupted.set()
+
+
+def _new_capture_file(base: Path, stream_name: str) -> tuple[int, Path]:
+    """Create a private temporary file that can later be atomically published."""
+
+    descriptor, name = tempfile.mkstemp(prefix=f".{stream_name}.", dir=str(base))
+    path = Path(name)
+    os.chmod(path, 0o600)
+    return descriptor, path
+
+
+def _stream_pipe(
+    stream: Any,
+    descriptor: int,
+    budget: OutputBudget,
+    result: dict[str, Any],
+) -> None:
+    """Drain one pipe in fixed chunks, retaining only the globally permitted bytes."""
+
+    digest = hashlib.sha256()
+    byte_count = 0
+    try:
+        with os.fdopen(descriptor, "wb") as destination:
+            while True:
+                chunk = stream.read(STREAM_CHUNK_BYTES)
+                if not chunk:
+                    break
+                accepted = budget.reserve(len(chunk))
+                if accepted:
+                    retained = chunk[:accepted]
+                    destination.write(retained)
+                    digest.update(retained)
+                    byte_count += len(retained)
+            destination.flush()
+            os.fsync(destination.fileno())
+    except (OSError, ValueError):
+        budget.mark_capture_failed()
+    finally:
+        try:
+            stream.close()
+        except OSError:
+            pass
+        result["bytes"] = byte_count
+        result["sha256"] = digest.hexdigest()
+
+
+def _close_empty_capture(descriptor: int, result: dict[str, Any]) -> None:
+    """Finish a deliberately empty capture file with its exact empty digest."""
+
+    with os.fdopen(descriptor, "wb") as destination:
+        destination.flush()
+        os.fsync(destination.fileno())
+    result["bytes"] = 0
+    result["sha256"] = hashlib.sha256().hexdigest()
+
+
+def _stop_process_group(process: subprocess.Popen[Any]) -> None:
+    """Terminate a runq process group, escalating after one bounded grace window."""
+
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.terminate()
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=TERMINATE_GRACE_SECONDS)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=TERMINATE_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _wait_for_process(process: subprocess.Popen[Any], wake: threading.Event) -> None:
+    """Wake the coordinator when a child exits without polling in the hot path."""
+
+    process.wait()
+    wake.set()
+
+
+def _publish_capture(temporary: Path, final: Path) -> None:
+    """Publish a fully fsynced private output file without a partial final path."""
+
+    os.replace(temporary, final)
+    os.chmod(final, 0o600)
+
+
+def _copy_capture(path: Path, destination: Any) -> None:
+    """Replay an explicitly requested output stream without accumulating it in memory."""
+
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(STREAM_CHUNK_BYTES), b""):
+            destination.write(chunk)
+    destination.flush()
+
+
+def _scope_binding_arguments(args: argparse.Namespace) -> tuple[int, int, str, str, str] | None:
+    """Accept an all-or-nothing scope/stop handoff from scoped launchers."""
+
+    values = (
+        args.scope_generation,
+        args.stop_generation,
+        args.scope_file_sha256,
+        args.scope_content_sha256,
+        args.launch_binding_sha256,
+    )
+    if values == (None, None, "", "", ""):
+        return None
+    if (
+        args.scope_generation is None
+        or args.stop_generation is None
+        or isinstance(args.scope_generation, bool)
+        or isinstance(args.stop_generation, bool)
+        or not isinstance(args.scope_file_sha256, str)
+        or not isinstance(args.scope_content_sha256, str)
+        or not isinstance(args.launch_binding_sha256, str)
+    ):
+        raise ValueError("scope binding must be complete")
+    return (
+        int(args.scope_generation),
+        int(args.stop_generation),
+        args.scope_file_sha256,
+        args.scope_content_sha256,
+        args.launch_binding_sha256,
+    )
+
+
+def _process_starttime(pid: int) -> str:
+    try:
+        return (Path("/proc") / str(pid) / "stat").read_text().split()[21]
+    except (OSError, IndexError):
+        return ""
+
+
+def _process_argv(pid: int) -> list[str] | None:
+    try:
+        values = (Path("/proc") / str(pid) / "cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return None
+    argv = [value.decode("utf-8", errors="replace") for value in values if value]
+    return argv or None
+
+
+def _owned_process_identity(
+    pid: int,
+    *,
+    owner_token: str,
+    include_owner_token: bool = True,
+) -> dict[str, Any] | None:
+    """Capture the process-owned proof from one live /proc observation."""
+
+    try:
+        pgid = os.getpgid(pid)
+    except (OSError, ProcessLookupError):
+        return None
+    argv = _process_argv(pid)
+    starttime = _process_starttime(pid)
+    if not argv or not starttime:
+        return None
+    identity = {
+        "pid": pid,
+        "pgid": pgid,
+        "process_starttime": starttime,
+        "argv_sha256": sha256_bytes(canonical_json(argv).encode("utf-8")),
+        "executable_sha256": sha256_bytes(argv[0].encode("utf-8")),
+        "workspace_root_sha256": sha256_bytes(
+            str(ROOT.resolve()).encode("utf-8")
+        ),
+        "owner_token_sha256": sha256_bytes(owner_token.encode("utf-8")),
+    }
+    if include_owner_token:
+        identity["owner_token"] = owner_token
+    return identity
+
+
+def _identity_has_exact_proofs(identity: dict[str, Any]) -> bool:
+    """Reject legacy or partial records before process-group signalling."""
+
+    required = (
+        "pid",
+        "pgid",
+        "process_starttime",
+        "argv_sha256",
+        "executable_sha256",
+        "workspace_root_sha256",
+        "owner_token_sha256",
+    )
+    if any(not identity.get(key) for key in required):
+        return False
+    return all(
+        isinstance(identity[key], str)
+        and bool(re.fullmatch(r"[0-9a-f]{64}", identity[key]))
+        for key in (
+            "argv_sha256",
+            "executable_sha256",
+            "workspace_root_sha256",
+            "owner_token_sha256",
+        )
+    )
+
+
+def _process_group_id(candidate: Path) -> int | None:
+    """Read Linux stat field five without being confused by a spaced comm name."""
+
+    try:
+        raw = (candidate / "stat").read_text()
+        closing = raw.rfind(")")
+        fields = raw[closing + 2 :].split()
+        return int(fields[2]) if closing >= 0 and len(fields) > 2 else None
+    except (OSError, ValueError):
+        return None
+
+
+def _process_group_exists(identity: dict[str, Any]) -> bool:
+    """Observe whether any process still occupies the durably owned PGID."""
+
+    try:
+        pgid = int(identity["pgid"])
+        candidates = tuple(Path("/proc").iterdir())
+    except (OSError, TypeError, ValueError):
+        return False
+    return any(
+        candidate.name.isdigit() and _process_group_id(candidate) == pgid
+        for candidate in candidates
+    )
+
+
+def _owned_group_member_exists(identity: dict[str, Any]) -> bool:
+    """Prove a retained-pipe descendant still belongs to this owned group."""
+
+    if not _identity_has_exact_proofs(identity):
+        return False
+    try:
+        pgid = int(identity["pgid"])
+    except (TypeError, ValueError):
+        return False
+    expected_token = str(identity.get("owner_token", ""))
+    expected_token_sha256 = str(identity["owner_token_sha256"])
+    try:
+        candidates = tuple(Path("/proc").iterdir())
+    except OSError:
+        return False
+    for candidate in candidates:
+        if not candidate.name.isdigit():
+            continue
+        try:
+            if _process_group_id(candidate) != pgid:
+                continue
+            environment = (candidate / "environ").read_bytes().split(b"\0")
+        except (OSError, ValueError):
+            continue
+        for entry in environment:
+            if not entry.startswith(b"ROOKERY_OWNER_TOKEN="):
+                continue
+            token = entry.removeprefix(b"ROOKERY_OWNER_TOKEN=")
+            if expected_token and token != expected_token.encode("utf-8"):
+                continue
+            if sha256_bytes(token) == expected_token_sha256:
+                return True
+    return False
+
+
+def _owned_identity_or_group_matches(identity: dict[str, Any]) -> bool:
+    if not _identity_has_exact_proofs(identity):
+        return False
+    if process_identity_matches(ROOT, identity):
+        return True
+    # A retained descendant is useful ownership evidence only after the exact
+    # recorded leader has disappeared. While that PID is still live, any
+    # mismatch (including argv/executable/start-time/root/token) is a strict
+    # no-signal result rather than permission to fall back to group membership.
+    try:
+        leader_is_live = (Path("/proc") / str(int(identity["pid"]))).exists()
+    except (TypeError, ValueError):
+        return False
+    return not leader_is_live and _owned_group_member_exists(identity)
+
+
+def _wait_for_owned_group_disappearance(
+    identity: dict[str, Any], *, timeout: float
+) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _process_group_exists(identity):
+            return True
+        time.sleep(0.05)
+    return not _process_group_exists(identity)
+
+
+def _terminate_owned_process_group(identity: dict[str, Any]) -> str:
+    """TERM then KILL only an exactly proved owned group, and verify absence."""
+
+    if not _owned_identity_or_group_matches(identity):
+        return "unmanaged"
+    try:
+        os.killpg(int(identity["pgid"]), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, ValueError):
+        return "stopped" if not _process_group_exists(identity) else "unmanaged"
+    if _wait_for_owned_group_disappearance(
+        identity, timeout=TERMINATE_GRACE_SECONDS
+    ):
+        return "stopped"
+    if not _owned_identity_or_group_matches(identity):
+        return "unmanaged" if _process_group_exists(identity) else "stopped"
+    try:
+        os.killpg(int(identity["pgid"]), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, ValueError):
+        return "stopped" if not _process_group_exists(identity) else "unmanaged"
+    if _wait_for_owned_group_disappearance(
+        identity, timeout=TERMINATE_GRACE_SECONDS
+    ):
+        return "stopped"
+    if not _process_group_exists(identity):
+        return "stopped"
+    return "unacknowledged" if _owned_identity_or_group_matches(identity) else "unmanaged"
+
+
+def _terminate_unverified_spawn(process: subprocess.Popen[Any]) -> str:
+    """Contain a just-created Popen child before durable identity handoff fails."""
+
+    if process.poll() is not None:
+        return "stopped"
+    try:
+        pgid = os.getpgid(process.pid)
+    except (OSError, ProcessLookupError):
+        return "unmanaged" if process.poll() is None else "stopped"
+    try:
+        if pgid == process.pid:
+            os.killpg(pgid, signal.SIGTERM)
+        else:
+            process.terminate()
+    except (ProcessLookupError, PermissionError):
+        return "stopped" if process.poll() is not None else "unmanaged"
+    try:
+        process.wait(timeout=TERMINATE_GRACE_SECONDS)
+        return "stopped"
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        if pgid == process.pid:
+            os.killpg(pgid, signal.SIGKILL)
+        else:
+            process.kill()
+    except (ProcessLookupError, PermissionError):
+        return "stopped" if process.poll() is not None else "unmanaged"
+    try:
+        process.wait(timeout=TERMINATE_GRACE_SECONDS)
+        return "stopped"
+    except subprocess.TimeoutExpired:
+        return "unacknowledged" if process.poll() is None else "unmanaged"
+
+
+def _command_identity(
+    process: subprocess.Popen[Any],
+    *,
+    command_id: str,
+    command: list[str],
+    argv_sha256: str,
+    owner_token: str,
+) -> dict[str, Any] | None:
+    """Observe a stable, value-free identity before releasing scope handoff."""
+
+    deadline = time.monotonic() + 2.0
+    consecutive_matches = 0
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            return None
+        observed = _owned_process_identity(
+            process.pid,
+            owner_token=owner_token,
+            include_owner_token=False,
+        )
+        if observed is None:
+            consecutive_matches = 0
+            time.sleep(0.02)
+            continue
+        payload = {
+            "command_id": command_id,
+            **observed,
+            "started_at": iso_now(),
+        }
+        if process_identity_matches(ROOT, payload):
+            consecutive_matches += 1
+            if consecutive_matches >= 3:
+                return payload
+        else:
+            consecutive_matches = 0
+        time.sleep(0.02)
+    return None
+
+
+def _terminate_verified_command(
+    process: subprocess.Popen[Any], identity: dict[str, Any]
+) -> str:
+    """Stop a scoped command only while its exact durable identity still holds."""
+
+    del process
+    return _terminate_owned_process_group(identity)
+
+
+def _scope_terminal_status(
+    store: EventStore, scope_binding: tuple[int, int, str, str, str]
+) -> str:
+    """Classify a value-free post-request scope refusal without a child."""
+
+    try:
+        snapshot = store.read_snapshot()
+        stop_generation = int(snapshot.get("meta", {}).get("stop_generation", "0"))
+        if stop_generation != scope_binding[1]:
+            return "scope_revoked"
+    except (TypeError, ValueError, OSError):
+        pass
+    return "stale_binding"
+
+
+def _record_command_terminal(
+    store: EventStore,
+    lifecycle: dict[str, str],
+    *,
+    status: str,
+    reason: str,
+    identity: dict[str, Any] | None = None,
+) -> None:
+    """Append a value-free command terminal without exposing owner material."""
+
+    store.append(
+        f"command.{status}",
+        {
+            **lifecycle,
+            **(identity or {}),
+            "reason": reason,
+            "reconciled_at": iso_now(),
+        },
+        actor="runq",
+    )
+
+
+def runq(args: argparse.Namespace) -> int:
+    cmd = args.command
+    if cmd and cmd[0] == "--":
+        cmd = cmd[1:]
+    if not cmd:
+        raise ValueError("command required")
+    if args.timeout <= 0:
+        raise ValueError("timeout must be positive")
+    if args.max_output_bytes <= 0:
+        raise ValueError("max-output-bytes must be positive")
+    scope_binding = _scope_binding_arguments(args)
+    if scope_binding is not None:
+        # Reject an already-stale handoff before allocating command evidence;
+        # the shared-lock recheck at Popen below closes the remaining race.
+        verify_canonical_compiled_scope_binding(
+            ROOT,
+            scope_generation=scope_binding[0],
+            stop_generation=scope_binding[1],
+            file_sha256=scope_binding[2],
+            content_sha256=scope_binding[3],
+            launch_binding_sha256=scope_binding[4],
+        )
+    label = safe(args.label)
+    command_id = "cmd_" + uuid.uuid4().hex
+    owner_token = (
+        "runq-command-" + uuid.uuid4().hex if scope_binding is not None else ""
+    )
+    child_environment = _run_child_environment(
+        args,
+        policy_name="runq-minimal",
+        internal={"ROOKERY_OWNER_TOKEN": owner_token} if owner_token else None,
+    )
+    environment_metadata = child_environment.metadata()["environment"]
+    logs_root = ROOT / "logs"
+    command_root = logs_root / "commands"
+    _ensure_private_directory(command_root)
+    base = Path(
+        tempfile.mkdtemp(
+            prefix=f"{dt.datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-{label}-{command_id}-",
+            dir=str(command_root),
+        )
+    )
+    os.chmod(base, 0o700)
+    start = iso_now()
+    started_ns = time.monotonic_ns()
+    argv_sha256 = sha256_bytes(canonical_json(cmd).encode("utf-8"))
+    release_version = (
+        (ROOT / "VERSION").read_text(encoding="utf-8", errors="replace").strip()
+        if (ROOT / "VERSION").is_file()
+        else "unknown"
+    )
+    store = EventStore(ROOT)
+    lifecycle = {
+        "command_id": command_id,
+        "attempt_id": args.attempt_id,
+        "parent_attempt_id": args.parent_attempt_id,
+        "proposal_id": args.proposal_id,
+        "plan_id": args.plan_id,
+    }
+    store.append(
+        "command.requested",
+        {
+            **lifecycle,
+            "label": label,
+            "argv_sha256": argv_sha256,
+            "cwd": str(ROOT),
+            "timeout_seconds": args.timeout,
+            "max_output_bytes": args.max_output_bytes,
+            "remote_mutation": args.mutation,
+            "release_version": release_version,
+            "environment": environment_metadata,
+            "requested_at": start,
+        },
+        actor="runq",
+    )
+    stdout_path = base / "stdout.log"
+    stderr_path = base / "stderr.log"
+    stdout_descriptor, stdout_temporary = _new_capture_file(base, "stdout")
+    stderr_descriptor, stderr_temporary = _new_capture_file(base, "stderr")
+    stdout_result: dict[str, Any] = {}
+    stderr_result: dict[str, Any] = {}
+    budget = OutputBudget(args.max_output_bytes)
+    stdout_thread: threading.Thread | None = None
+    stderr_thread: threading.Thread | None = None
+    waiter_thread: threading.Thread | None = None
+    process: subprocess.Popen[Any] | None = None
+    command_identity: dict[str, Any] | None = None
+    lifecycle_terminal = ""
+    lifecycle_terminal_recorded = False
+    termination = "spawn_error"
+    rc = 127
+    try:
+        if scope_binding is None:
+            process = subprocess.Popen(
+                cmd,
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                shell=False,
+                start_new_session=True,
+                env=child_environment.values,
+            )
+        else:
+            with verified_canonical_scope_effect(
+                ROOT,
+                scope_generation=scope_binding[0],
+                stop_generation=scope_binding[1],
+                file_sha256=scope_binding[2],
+                content_sha256=scope_binding[3],
+                launch_binding_sha256=scope_binding[4],
+            ):
+                process = subprocess.Popen(
+                    cmd,
+                    cwd=ROOT,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    shell=False,
+                    start_new_session=True,
+                    env=child_environment.values,
+                )
+                command_identity = _command_identity(
+                    process,
+                    command_id=command_id,
+                    command=cmd,
+                    argv_sha256=argv_sha256,
+                    owner_token=owner_token,
+                )
+                if command_identity is None:
+                    lifecycle_terminal = _terminate_unverified_spawn(process)
+                    termination = lifecycle_terminal
+                    rc = CAPTURE_ERROR_EXIT_CODE
+                    _record_command_terminal(
+                        store,
+                        lifecycle,
+                        status=lifecycle_terminal,
+                        reason=(
+                            "scoped command identity was not observable before "
+                            "handoff; just-created child cleanup "
+                            + lifecycle_terminal
+                        ),
+                    )
+                    lifecycle_terminal_recorded = True
+                else:
+                    try:
+                        # Keep the verified scope lock through both Popen and
+                        # this durable identity handoff. ``./go stop`` can then
+                        # either precede spawn or stop this exact child.
+                        store.append(
+                            "command.started",
+                            {**lifecycle, **command_identity},
+                            actor="runq",
+                        )
+                    except Exception:
+                        lifecycle_terminal = _terminate_verified_command(
+                            process, command_identity
+                        )
+                        termination = lifecycle_terminal
+                        rc = CAPTURE_ERROR_EXIT_CODE
+                        _record_command_terminal(
+                            store,
+                            lifecycle,
+                            status=lifecycle_terminal,
+                            reason="scoped command identity checkpoint failed",
+                            identity=command_identity,
+                        )
+                        lifecycle_terminal_recorded = True
+    except ScopeAuthorityError:
+        if process is None:
+            # The post-request recheck failed before Popen: preserve exactly
+            # one value-free requested/completed pair and do not invent a child.
+            termination = _scope_terminal_status(store, scope_binding)
+            rc = 126
+        elif command_identity is None:
+            lifecycle_terminal = _terminate_unverified_spawn(process)
+            termination = lifecycle_terminal
+            rc = CAPTURE_ERROR_EXIT_CODE
+            _record_command_terminal(
+                store,
+                lifecycle,
+                status=lifecycle_terminal,
+                reason=(
+                    "scope handoff failed after an unverified child spawn; "
+                    "cleanup " + lifecycle_terminal
+                ),
+            )
+            lifecycle_terminal_recorded = True
+        else:
+            lifecycle_terminal = _terminate_verified_command(
+                process, command_identity
+            )
+            termination = lifecycle_terminal
+            rc = CAPTURE_ERROR_EXIT_CODE
+            _record_command_terminal(
+                store,
+                lifecycle,
+                status=lifecycle_terminal,
+                reason="scope handoff failed after a verified child spawn",
+                identity=command_identity,
+            )
+            lifecycle_terminal_recorded = True
+        _close_empty_capture(stdout_descriptor, stdout_result)
+        _close_empty_capture(stderr_descriptor, stderr_result)
+    except OSError:
+        _close_empty_capture(stdout_descriptor, stdout_result)
+        _close_empty_capture(stderr_descriptor, stderr_result)
+    else:
+        if process is None:
+            _close_empty_capture(stdout_descriptor, stdout_result)
+            _close_empty_capture(stderr_descriptor, stderr_result)
+        elif lifecycle_terminal:
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+            _close_empty_capture(stdout_descriptor, stdout_result)
+            _close_empty_capture(stderr_descriptor, stderr_result)
+        elif process.stdout is None or process.stderr is None:
+            _close_empty_capture(stdout_descriptor, stdout_result)
+            _close_empty_capture(stderr_descriptor, stderr_result)
+            budget.mark_capture_failed()
+            termination = "capture_error"
+            rc = CAPTURE_ERROR_EXIT_CODE
+            if command_identity is None:
+                _stop_process_group(process)
+            else:
+                lifecycle_terminal = _terminate_verified_command(
+                    process, command_identity
+                )
+        else:
+            stdout_thread = threading.Thread(
+                target=_stream_pipe,
+                args=(process.stdout, stdout_descriptor, budget, stdout_result),
+                name=f"runq-stdout-{command_id}",
+                daemon=True,
+            )
+            stderr_thread = threading.Thread(
+                target=_stream_pipe,
+                args=(process.stderr, stderr_descriptor, budget, stderr_result),
+                name=f"runq-stderr-{command_id}",
+                daemon=True,
+            )
+            stdout_thread.start()
+            stderr_thread.start()
+            waiter_thread = threading.Thread(
+                target=_wait_for_process,
+                args=(process, budget.interrupted),
+                name=f"runq-wait-{command_id}",
+                daemon=True,
+            )
+            waiter_thread.start()
+            deadline = time.monotonic() + args.timeout
+            if not budget.interrupted.wait(timeout=max(0, deadline - time.monotonic())):
+                termination = "timeout"
+                rc = 124
+                if command_identity is None:
+                    _stop_process_group(process)
+                else:
+                    lifecycle_terminal = _terminate_verified_command(
+                        process, command_identity
+                    )
+            elif process.poll() is not None:
+                rc = process.returncode
+                termination = "signal" if rc < 0 else "exited"
+            elif budget.capture_failed.is_set():
+                termination = "capture_error"
+                rc = CAPTURE_ERROR_EXIT_CODE
+                if command_identity is None:
+                    _stop_process_group(process)
+                else:
+                    lifecycle_terminal = _terminate_verified_command(
+                        process, command_identity
+                    )
+            else:
+                termination = "output_limit"
+                rc = OUTPUT_LIMIT_EXIT_CODE
+                if command_identity is None:
+                    _stop_process_group(process)
+                else:
+                    lifecycle_terminal = _terminate_verified_command(
+                        process, command_identity
+                    )
+            for thread in (stdout_thread, stderr_thread):
+                thread.join(timeout=TERMINATE_GRACE_SECONDS)
+            if stdout_thread.is_alive() or stderr_thread.is_alive():
+                budget.mark_capture_failed()
+                termination = "capture_error"
+                rc = CAPTURE_ERROR_EXIT_CODE
+                for stream in (process.stdout, process.stderr):
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+                for thread in (stdout_thread, stderr_thread):
+                    thread.join(timeout=TERMINATE_GRACE_SECONDS)
+            waiter_thread.join(timeout=TERMINATE_GRACE_SECONDS)
+    if lifecycle_terminal and lifecycle_terminal not in {"stopped", ""}:
+        termination = lifecycle_terminal
+    if (
+        scope_binding is not None
+        and command_identity is not None
+        and lifecycle_terminal in {"unacknowledged", "unmanaged"}
+        and not lifecycle_terminal_recorded
+    ):
+        _record_command_terminal(
+            store,
+            lifecycle,
+            status=lifecycle_terminal,
+            reason="scoped command did not reach a confirmed terminal state",
+            identity=command_identity,
+        )
+        lifecycle_terminal_recorded = True
+    if budget.capture_failed.is_set() and termination == "exited":
+        termination = "capture_error"
+        rc = CAPTURE_ERROR_EXIT_CODE
+    elif budget.output_limited.is_set() and termination == "exited":
+        termination = "output_limit"
+        rc = OUTPUT_LIMIT_EXIT_CODE
+    if (
+        scope_binding is not None
+        and command_identity is not None
+        and process is not None
+        and process.poll() is None
+    ):
+        if not lifecycle_terminal:
+            lifecycle_terminal = (
+                "unacknowledged"
+                if process_identity_matches(ROOT, command_identity)
+                else "unmanaged"
+            )
+        termination = lifecycle_terminal
+        if not lifecycle_terminal_recorded:
+            _record_command_terminal(
+                store,
+                lifecycle,
+                status=lifecycle_terminal,
+                reason="scoped command did not reach a confirmed terminal state",
+                identity=command_identity,
+            )
+            lifecycle_terminal_recorded = True
+    _publish_capture(stdout_temporary, stdout_path)
+    _publish_capture(stderr_temporary, stderr_path)
+    ended_at = iso_now()
+    elapsed_ms = max(0, (time.monotonic_ns() - started_ns) // 1_000_000)
+    meta = command_meta(
+        command_id=command_id,
+        label=label,
+        command=cmd,
+        start=start,
+        end=ended_at,
+        elapsed_ms=elapsed_ms,
+        rc=rc,
+        termination=termination,
+        stdout_path=str(stdout_path.relative_to(ROOT)),
+        stderr_path=str(stderr_path.relative_to(ROOT)),
+        stdout_bytes=int(stdout_result["bytes"]),
+        stderr_bytes=int(stderr_result["bytes"]),
+        stdout_sha256=str(stdout_result["sha256"]),
+        stderr_sha256=str(stderr_result["sha256"]),
+        timeout=args.timeout,
+        mutation=args.mutation,
+        attempt_id=args.attempt_id,
+        parent_attempt_id=args.parent_attempt_id,
+        proposal_id=args.proposal_id,
+        plan_id=args.plan_id,
+        max_output_bytes=args.max_output_bytes,
+        environment=environment_metadata,
+    )
+    meta["release_version"] = release_version
+    atomic_write_json(
+        base / "digest.json",
+        {
+            "schema_version": "2",
+            "complete": True,
+            "sha256": meta["stdout_sha256"],
+            "byte_count": meta["stdout_bytes"],
+            "stderr": {
+                "sha256": meta["stderr_sha256"],
+                "byte_count": meta["stderr_bytes"],
+            },
+        },
+        mode=PRIVATE_FILE_MODE,
+    )
+    # Publish the complete envelope last so readers never accept partial output.
+    atomic_write_json(base / "meta.json", meta, mode=PRIVATE_FILE_MODE)
+    completion_confirmed = (
+        scope_binding is None or process is None or process.poll() is not None
+    )
+    if completion_confirmed:
+        store.append(
+            "command.completed",
+            {
+                **lifecycle,
+                "argv_sha256": argv_sha256,
+                "status": termination,
+                "exit_code": rc,
+                "elapsed_ms": elapsed_ms,
+                "stdout_path": meta["stdout_path"],
+                "stderr_path": meta["stderr_path"],
+                "stdout_bytes": meta["stdout_bytes"],
+                "stderr_bytes": meta["stderr_bytes"],
+                "stdout_sha256": meta["stdout_sha256"],
+                "stderr_sha256": meta["stderr_sha256"],
+                "max_output_bytes": args.max_output_bytes,
+                "release_version": release_version,
+                "environment": environment_metadata,
+                "completed_at": ended_at,
+            },
+            actor="runq",
+        )
+    store.rebuild()
+    if args.print_output:
+        _copy_capture(stdout_path, sys.stdout.buffer)
+        _copy_capture(stderr_path, sys.stderr.buffer)
+    print(json.dumps(meta, indent=2))
+    return rc
+
+
+def _background_limits(args: argparse.Namespace) -> tuple[int, int]:
+    timeout = int(args.timeout)
+    max_output_bytes = int(args.max_output_bytes)
+    if timeout <= 0 or timeout > MAX_BACKGROUND_TIMEOUT_SECONDS:
+        raise ValueError(
+            f"background timeout must be between 1 and {MAX_BACKGROUND_TIMEOUT_SECONDS} seconds"
+        )
+    if max_output_bytes <= 0 or max_output_bytes > MAX_BACKGROUND_OUTPUT_BYTES:
+        raise ValueError(
+            "background max-output-bytes must be between 1 and "
+            f"{MAX_BACKGROUND_OUTPUT_BYTES}"
+        )
+    return timeout, max_output_bytes
+
+
+def _job_maximum(root: Path) -> int:
+    manifest = load_json(root / "state/resolved_event.json", {})
+    if not isinstance(manifest, dict) or not manifest:
+        manifest = load_json(root / "profiles/generic.json", {})
+    concurrency = manifest.get("concurrency", {}) if isinstance(manifest, dict) else {}
+    if not isinstance(concurrency, dict):
+        return 0
+    maximum = int(concurrency.get("max_jobs", 0) or 0)
+    return max(0, maximum)
+
+
+def _active_job_count(current: dict[str, Any]) -> int:
+    return sum(
+        1
+        for job in current.get("jobs", {}).values()
+        if job.get("status") in ACTIVE_JOB_STATES | {"starting"}
+    )
+
+
+def _write_job_metadata(directory: Path, metadata: dict[str, Any]) -> None:
+    _ensure_private_directory(directory)
+    _ensure_private_file(directory / "meta.json")
+    atomic_write_json(directory / "meta.json", metadata, mode=PRIVATE_FILE_MODE)
+
+
+def _job_terminal_metadata(
+    metadata: dict[str, Any],
+    *,
+    status: str,
+    termination: str,
+    exit_code: int | None,
+    stdout: dict[str, Any],
+    stderr: dict[str, Any],
+    resource_summary: dict[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        **metadata,
+        "status": status,
+        "termination": termination,
+        "exit_code": exit_code,
+        "stdout_bytes": int(stdout.get("bytes", 0)),
+        "stderr_bytes": int(stderr.get("bytes", 0)),
+        "stdout_sha256": str(stdout.get("sha256", "")),
+        "stderr_sha256": str(stderr.get("sha256", "")),
+        "resource_summary": resource_summary,
+        "reason": reason,
+        "finished_at": iso_now(),
+        "complete": True,
+    }
+
+
+def _record_background_terminal(
+    directory: Path,
+    identity: dict[str, Any],
+    metadata: dict[str, Any],
+    *,
+    termination: str,
+    exit_code: int | None,
+    stdout: dict[str, Any],
+    stderr: dict[str, Any],
+    resource_summary: dict[str, Any],
+    cleanup: str,
+) -> None:
+    """Publish a background terminal only while it still reflects process truth."""
+
+    with file_lock(ROOT / "state" / "mutation.lock"):
+        store = EventStore(ROOT)
+        current = store.rebuild()["current"]
+        job_id = str(identity["job_id"])
+        latest = current.get("jobs", {}).get(job_id, {})
+        if latest.get("status") in {
+            "closed",
+            "cancelled",
+            "unacknowledged",
+            "unmanaged",
+            "failed",
+        }:
+            return
+        group_remains = _process_group_exists(identity)
+        if group_remains:
+            status = "unacknowledged" if cleanup == "unacknowledged" else "unmanaged"
+            reason = "background process group remains live after bounded cleanup"
+        elif cleanup in {"unacknowledged", "unmanaged"}:
+            status = "unmanaged"
+            reason = "background process identity was not verifiable after cleanup"
+        else:
+            status = "closed"
+            reason = "background process exit confirmed"
+        terminal = _job_terminal_metadata(
+            metadata,
+            status=status,
+            termination=termination,
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            resource_summary=resource_summary,
+            reason=reason,
+        )
+        _write_job_metadata(directory, terminal)
+        store.append(
+            f"job.{status}",
+            {
+                **terminal,
+                "job_id": job_id,
+                "reconciled_at": terminal["finished_at"],
+            },
+            actor="runbg-supervisor",
+        )
+        store.rebuild()
+
+
+def _supervise_background_job(
+    process: subprocess.Popen[Any],
+    identity: dict[str, Any],
+    directory: Path,
+    metadata: dict[str, Any],
+) -> None:
+    """Drain and bound one detached job, then publish its verified terminal truth."""
+
+    stdout_result: dict[str, Any] = {}
+    stderr_result: dict[str, Any] = {}
+    budget = OutputBudget(int(metadata["max_output_bytes"]))
+    stdout_descriptor = _open_private_capture_descriptor(directory / "stdout.log")
+    stderr_descriptor = _open_private_capture_descriptor(directory / "stderr.log")
+    if process.stdout is None or process.stderr is None:
+        _close_empty_capture(stdout_descriptor, stdout_result)
+        _close_empty_capture(stderr_descriptor, stderr_result)
+        cleanup = _terminate_owned_process_group(identity)
+        _record_background_terminal(
+            directory,
+            identity,
+            metadata,
+            termination="capture_error",
+            exit_code=CAPTURE_ERROR_EXIT_CODE,
+            stdout=stdout_result,
+            stderr=stderr_result,
+            resource_summary=process_resource_snapshot(int(identity["pid"])),
+            cleanup=cleanup,
+        )
+        return
+    stdout_thread = threading.Thread(
+        target=_stream_pipe,
+        args=(process.stdout, stdout_descriptor, budget, stdout_result),
+        name=f"runbg-stdout-{identity['job_id']}",
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=_stream_pipe,
+        args=(process.stderr, stderr_descriptor, budget, stderr_result),
+        name=f"runbg-stderr-{identity['job_id']}",
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+    waiter = threading.Thread(
+        target=_wait_for_process,
+        args=(process, budget.interrupted),
+        name=f"runbg-wait-{identity['job_id']}",
+        daemon=True,
+    )
+    waiter.start()
+    timeout = int(metadata["timeout_seconds"])
+    termination = "exited"
+    exit_code: int | None = None
+    cleanup = "stopped"
+    if not budget.interrupted.wait(timeout=timeout):
+        termination = "timeout"
+        exit_code = 124
+        cleanup = _terminate_owned_process_group(identity)
+    elif process.poll() is not None:
+        exit_code = process.returncode
+        termination = "signal" if int(exit_code or 0) < 0 else "exited"
+        # A detached descendant can retain the capture pipes after its leader
+        # exits. The leader's ordinary wait result is not a terminal truth for
+        # the job group; contain the proved descendant immediately.
+        if _owned_group_member_exists(identity):
+            termination = "capture_error"
+            exit_code = CAPTURE_ERROR_EXIT_CODE
+            cleanup = _terminate_owned_process_group(identity)
+    elif budget.capture_failed.is_set():
+        termination = "capture_error"
+        exit_code = CAPTURE_ERROR_EXIT_CODE
+        cleanup = _terminate_owned_process_group(identity)
+    else:
+        termination = "output_limit"
+        exit_code = OUTPUT_LIMIT_EXIT_CODE
+        cleanup = _terminate_owned_process_group(identity)
+    for thread in (stdout_thread, stderr_thread):
+        thread.join(timeout=TERMINATE_GRACE_SECONDS)
+    if stdout_thread.is_alive() or stderr_thread.is_alive():
+        termination = "capture_error"
+        exit_code = CAPTURE_ERROR_EXIT_CODE
+        cleanup = _terminate_owned_process_group(identity)
+        for stream in (process.stdout, process.stderr):
+            try:
+                stream.close()
+            except OSError:
+                pass
+        for thread in (stdout_thread, stderr_thread):
+            thread.join(timeout=TERMINATE_GRACE_SECONDS)
+    waiter.join(timeout=TERMINATE_GRACE_SECONDS)
+    if budget.output_limited.is_set() and termination == "exited":
+        termination = "output_limit"
+        exit_code = OUTPUT_LIMIT_EXIT_CODE
+        cleanup = _terminate_owned_process_group(identity)
+    elif budget.capture_failed.is_set() and termination == "exited":
+        termination = "capture_error"
+        exit_code = CAPTURE_ERROR_EXIT_CODE
+        cleanup = _terminate_owned_process_group(identity)
+    if exit_code is None and process.poll() is not None:
+        exit_code = process.returncode
+    _record_background_terminal(
+        directory,
+        identity,
+        metadata,
+        termination=termination,
+        exit_code=exit_code,
+        stdout=stdout_result,
+        stderr=stderr_result,
+        resource_summary=process_resource_snapshot(int(identity["pid"])),
+        cleanup=cleanup,
+    )
+
+
+def _redirect_background_supervisor_stdio() -> None:
+    """Detach the supervisor from the short-lived runbg caller's pipes."""
+
+    null_descriptor = os.open(os.devnull, os.O_RDWR)
+    try:
+        for descriptor in (0, 1, 2):
+            os.dup2(null_descriptor, descriptor)
+    finally:
+        if null_descriptor > 2:
+            os.close(null_descriptor)
+
+
+def _write_supervisor_ready(descriptor: int, payload: dict[str, Any]) -> None:
+    encoded = canonical_json(payload).encode("utf-8")
+    if len(encoded) > 4096:
+        raise OSError("background supervisor ready message exceeds bound")
+    os.write(descriptor, encoded)
+
+
+def _supervisor_acknowledged(descriptor: int, *, timeout: float) -> bool:
+    ready, _, _ = select.select([descriptor], [], [], timeout)
+    if not ready:
+        return False
+    try:
+        return os.read(descriptor, 1) == b"1"
+    except OSError:
+        return False
+
+
+def _start_background_supervisor(
+    command: list[str],
+    child_environment: ChildEnvironment,
+    token: str,
+    directory: Path,
+    metadata: dict[str, Any],
+) -> tuple[int, int, int]:
+    """Start a supervisor-owned child and return its bounded identity handoff."""
+
+    if not hasattr(os, "fork"):
+        raise RuntimeError("background supervision requires POSIX fork support")
+    ready_read, ready_write = os.pipe()
+    acknowledge_read, acknowledge_write = os.pipe()
+    try:
+        supervisor_pid = os.fork()
+    except Exception:
+        os.close(ready_read)
+        os.close(ready_write)
+        os.close(acknowledge_read)
+        os.close(acknowledge_write)
+        raise
+    if supervisor_pid:
+        os.close(ready_write)
+        os.close(acknowledge_read)
+        try:
+            ready, _, _ = select.select([ready_read], [], [], TERMINATE_GRACE_SECONDS)
+            if not ready:
+                raise RuntimeError("background supervisor did not report a child")
+            raw = os.read(ready_read, 4097)
+            if not raw or len(raw) > 4096:
+                raise RuntimeError("background supervisor reported invalid child identity")
+            report = json.loads(raw)
+            if not isinstance(report, dict) or not isinstance(report.get("pid"), int):
+                raise RuntimeError("background supervisor reported invalid child identity")
+            return supervisor_pid, int(report["pid"]), acknowledge_write
+        except Exception:
+            try:
+                os.write(acknowledge_write, b"0")
+            except OSError:
+                pass
+            os.close(acknowledge_write)
+            raise
+        finally:
+            os.close(ready_read)
+    os.close(ready_read)
+    os.close(acknowledge_write)
+    try:
+        os.setsid()
+        _redirect_background_supervisor_stdio()
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                shell=False,
+                start_new_session=True,
+                env=child_environment.values,
+            )
+        except OSError:
+            _write_supervisor_ready(ready_write, {"status": "spawn_error"})
+            return 0, 0, 0
+        identity: dict[str, Any] | None = None
+        deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
+        consecutive_matches = 0
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            observed = _owned_process_identity(process.pid, owner_token=token)
+            if observed is not None and process_identity_matches(ROOT, observed):
+                consecutive_matches += 1
+                if consecutive_matches >= 3:
+                    identity = {**metadata, **observed}
+                    break
+            else:
+                consecutive_matches = 0
+            time.sleep(0.02)
+        _write_supervisor_ready(
+            ready_write,
+            {"pid": process.pid, "status": "ready" if identity else "unverified"},
+        )
+        if identity is None or not _supervisor_acknowledged(
+            acknowledge_read, timeout=TERMINATE_GRACE_SECONDS
+        ):
+            if identity is None:
+                _terminate_unverified_spawn(process)
+            else:
+                _terminate_owned_process_group(identity)
+            return 0, 0, 0
+        _supervise_background_job(process, identity, directory, metadata)
+    finally:
+        for descriptor in (ready_write, acknowledge_read):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        os._exit(0)
+
+
+def _record_runbg_start_failure(
+    store: EventStore,
+    directory: Path,
+    metadata: dict[str, Any],
+    *,
+    status: str,
+    reason: str,
+    termination: str,
+    exit_code: int,
+) -> dict[str, Any]:
+    terminal = _job_terminal_metadata(
+        metadata,
+        status=status,
+        termination=termination,
+        exit_code=exit_code,
+        stdout={"bytes": 0, "sha256": hashlib.sha256().hexdigest()},
+        stderr={"bytes": 0, "sha256": hashlib.sha256().hexdigest()},
+        resource_summary={},
+        reason=reason,
+    )
+    _write_job_metadata(directory, terminal)
+    store.append(f"job.{status}", terminal, actor="runbg")
+    store.rebuild()
+    return terminal
+
+
+def runbg(args: argparse.Namespace) -> int:
+    cmd = args.command
+    if cmd and cmd[0] == "--":
+        cmd = cmd[1:]
+    if not cmd:
+        raise ValueError("command required")
+    timeout, max_output_bytes = _background_limits(args)
+    jid = "job_" + uuid.uuid4().hex
+    token = f"rookery-job-{jid}"
+    child_environment = _run_child_environment(
+        args,
+        policy_name="runbg-minimal",
+        internal={"ROOKERY_OWNER_TOKEN": token},
+    )
+    environment_metadata = child_environment.metadata()["environment"]
+    store = EventStore(ROOT)
+    with file_lock(ROOT / "state" / "mutation.lock"):
+        current = store.rebuild()["current"]
+        if current.get("stopped"):
+            print(
+                json.dumps(
+                    {
+                        "job_id": jid,
+                        "status": "stopped",
+                        "reason": "workspace is stopped; explicit resume is required",
+                    },
+                    indent=2,
+                )
+            )
+            return 2
+        active_before = _active_job_count(current)
+        max_jobs = _job_maximum(ROOT)
+        if max_jobs and active_before >= max_jobs:
+            payload = {
+                "job_id": jid,
+                "label": args.label,
+                "status": "capacity_rejected",
+                "outcome_type": "capacity_failure",
+                "active_jobs": active_before,
+                "max_jobs": max_jobs,
+                "reason": "job concurrency limit reached",
+                "environment": environment_metadata,
+                "rejected_at": iso_now(),
+            }
+            store.append("job.capacity_rejected", payload, actor="runbg")
+            store.rebuild()
+            print(json.dumps(payload, indent=2))
+            return 3
+        jobs_root = ROOT / "logs" / "jobs"
+        _ensure_private_directory(jobs_root)
+        directory = jobs_root / jid
+        _ensure_private_directory(directory)
+        for name in ("stdout.log", "stderr.log"):
+            _ensure_private_file(directory / name)
+        metadata = {
+            "job_id": jid,
+            "label": args.label,
+            "command": cmd,
+            "owner_token": token,
+            "owner_token_sha256": sha256_bytes(token.encode("utf-8")),
+            "environment": environment_metadata,
+            "status": "starting",
+            "timeout_seconds": timeout,
+            "max_output_bytes": max_output_bytes,
+            "stdout_path": str((directory / "stdout.log").relative_to(ROOT)),
+            "stderr_path": str((directory / "stderr.log").relative_to(ROOT)),
+            "dispatch": {
+                "active_jobs_before": active_before,
+                "max_jobs": max_jobs,
+                "admission": "reserved",
+            },
+            "started_at": iso_now(),
+            "report_path": str(directory.relative_to(ROOT)),
+        }
+        _write_job_metadata(directory, metadata)
+        store.append("job.starting", metadata, actor="runbg")
+        try:
+            _supervisor_pid, child_pid, acknowledge_descriptor = _start_background_supervisor(
+                cmd,
+                child_environment,
+                token,
+                directory,
+                metadata,
+            )
+        except (OSError, RuntimeError):
+            terminal = _record_runbg_start_failure(
+                store,
+                directory,
+                metadata,
+                status="failed",
+                reason="background process could not be spawned",
+                termination="spawn_error",
+                exit_code=127,
+            )
+            print(json.dumps(terminal, indent=2))
+            return 127
+        metadata["supervisor_pid"] = _supervisor_pid
+        identity: dict[str, Any] | None = None
+        deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
+        consecutive_matches = 0
+        while time.monotonic() < deadline:
+            observed = _owned_process_identity(child_pid, owner_token=token)
+            if observed is not None and process_identity_matches(ROOT, observed):
+                consecutive_matches += 1
+                if consecutive_matches >= 3:
+                    identity = {**metadata, **observed}
+                    break
+            else:
+                consecutive_matches = 0
+            time.sleep(0.02)
+        if identity is None:
+            try:
+                os.write(acknowledge_descriptor, b"0")
+            except OSError:
+                pass
+            finally:
+                os.close(acknowledge_descriptor)
+            # Popen confirms that we contained the just-created child, but the
+            # full PID/PGID/start-time/argv/root/token handoff never became
+            # durable. Do not claim a verified job closure from that weaker
+            # observation; retain an explicit unresolved record instead.
+            terminal = _record_runbg_start_failure(
+                store,
+                directory,
+                metadata,
+                status="unmanaged",
+                reason=(
+                    "background process identity was not observable before "
+                    "handoff; supervisor was instructed to terminate it"
+                ),
+                termination="handoff_error",
+                exit_code=CAPTURE_ERROR_EXIT_CODE,
+            )
+            print(json.dumps(terminal, indent=2))
+            return CAPTURE_ERROR_EXIT_CODE
+        try:
+            store.append("job.starting", identity, actor="runbg")
+            running = {
+                **identity,
+                "status": "running",
+                "dispatch": {**metadata["dispatch"], "admission": "admitted"},
+            }
+            _write_job_metadata(directory, running)
+            store.append("job.running", running, actor="runbg")
+        except Exception:
+            cleanup = _terminate_owned_process_group(identity)
+            try:
+                os.write(acknowledge_descriptor, b"0")
+            except OSError:
+                pass
+            finally:
+                os.close(acknowledge_descriptor)
+            status = "closed" if cleanup == "stopped" else cleanup
+            terminal = _record_runbg_start_failure(
+                store,
+                directory,
+                running if "running" in locals() else identity,
+                status=status,
+                reason="background identity handoff could not be persisted",
+                termination="handoff_error",
+                exit_code=CAPTURE_ERROR_EXIT_CODE,
+            )
+            print(json.dumps(terminal, indent=2))
+            return CAPTURE_ERROR_EXIT_CODE
+        try:
+            os.write(acknowledge_descriptor, b"1")
+        except OSError:
+            cleanup = _terminate_owned_process_group(identity)
+            status = "closed" if cleanup == "stopped" else cleanup
+            terminal = _record_runbg_start_failure(
+                store,
+                directory,
+                running,
+                status=status,
+                reason="background supervisor could not be started",
+                termination="supervisor_error",
+                exit_code=CAPTURE_ERROR_EXIT_CODE,
+            )
+            print(json.dumps(terminal, indent=2))
+            return CAPTURE_ERROR_EXIT_CODE
+        finally:
+            try:
+                os.close(acknowledge_descriptor)
+            except OSError:
+                pass
+        store.rebuild()
+        print(json.dumps(running, indent=2))
+        return 0
+
+
+def jobs(args):
+    rows = []
+    for p in sorted((ROOT / "logs/jobs").glob("*/meta.json")):
+        row = json.loads(p.read_text())
+        pid = int(row.get("pid", 0))
+        alive = False
+        try:
+            os.kill(pid, 0)
+            alive = True
+        except OSError:
+            alive = False
+        row["alive"] = alive
+        rows.append(row)
+    print(json.dumps(rows, indent=2))
+    return 0
+
+
+def job_tail(args):
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", args.job_id):
+        raise ValueError("invalid job id")
+    d = ROOT / "logs/jobs" / args.job_id
+    for name in ["stdout.log", "stderr.log"]:
+        p = d / name
+        print(f"== {name} ==")
+        print("\n".join(p.read_text(errors="replace").splitlines()[-args.lines :]) if p.exists() else "")
+    return 0
+
+
+def job_kill(args: argparse.Namespace) -> int:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", args.job_id):
+        raise ValueError("invalid job id")
+    directory = ROOT / "logs/jobs" / args.job_id
+    with file_lock(ROOT / "state" / "mutation.lock"):
+        store = EventStore(ROOT)
+        current = store.rebuild()["current"]
+        if current.get("stopped"):
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "job_id": args.job_id,
+                        "status": "stopped",
+                        "reason": "workspace is stopped; stop reconciliation owns cleanup",
+                    },
+                    indent=2,
+                )
+            )
+            return 2
+        try:
+            _ensure_private_directory(directory)
+            metadata = json.loads((directory / "meta.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "job_id": args.job_id,
+                        "status": "unmanaged",
+                        "reason": "job metadata is unavailable",
+                    },
+                    indent=2,
+                )
+            )
+            return 2
+        if not isinstance(metadata, dict):
+            raise ValueError("job metadata must be an object")
+        metadata["job_id"] = args.job_id
+        pid = int(metadata.get("pid", 0) or 0)
+        pgid = int(metadata.get("pgid", pid) or pid)
+        if not _identity_has_exact_proofs(metadata) or not _owned_identity_or_group_matches(
+            metadata
+        ):
+            terminal = _job_terminal_metadata(
+                metadata,
+                status="unmanaged",
+                termination="identity_unverified",
+                exit_code=None,
+                stdout={
+                    "bytes": metadata.get("stdout_bytes", 0),
+                    "sha256": metadata.get("stdout_sha256", ""),
+                },
+                stderr={
+                    "bytes": metadata.get("stderr_bytes", 0),
+                    "sha256": metadata.get("stderr_sha256", ""),
+                },
+                resource_summary={},
+                reason="process identity does not match recorded ownership",
+            )
+            _write_job_metadata(directory, terminal)
+            store.append("job.unmanaged", terminal, actor="job-kill")
+            store.rebuild()
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "job_id": args.job_id,
+                        "pid": pid,
+                        "pgid": pgid,
+                        "status": "unmanaged",
+                    },
+                    indent=2,
+                )
+            )
+            return 2
+        resource_summary = process_resource_snapshot(pid)
+        cleanup = _terminate_owned_process_group(metadata)
+        status = "closed" if cleanup == "stopped" else cleanup
+        terminal = _job_terminal_metadata(
+            metadata,
+            status=status,
+            termination="job_kill",
+            exit_code=None,
+            stdout={
+                "bytes": metadata.get("stdout_bytes", 0),
+                "sha256": metadata.get("stdout_sha256", ""),
+            },
+            stderr={
+                "bytes": metadata.get("stderr_bytes", 0),
+                "sha256": metadata.get("stderr_sha256", ""),
+            },
+            resource_summary=resource_summary,
+            reason=(
+                "job-kill signal acknowledged"
+                if status == "closed"
+                else "job-kill could not confirm process-group disappearance"
+            ),
+        )
+        _write_job_metadata(directory, terminal)
+        store.append(
+            f"job.{status}",
+            {**terminal, "closed_at": terminal["finished_at"]},
+            actor="job-kill",
+        )
+        store.rebuild()
+        print(
+            json.dumps(
+                {
+                    "ok": status == "closed",
+                    "job_id": args.job_id,
+                    "pid": pid,
+                    "pgid": pgid,
+                    "status": status,
+                },
+                indent=2,
+            )
+        )
+        return 0 if status == "closed" else 1
+
+
+def evidence_scan(args):
+    findings = []
+    for raw in args.paths or ["."]:
+        p = Path(raw)
+        p = p if p.is_absolute() else ROOT / p
+        files = [p] if p.is_file() else [x for x in p.rglob("*") if x.is_file()][: args.max_files]
+        for f in files:
+            if f.stat().st_size > 4_000_000:
+                continue
+            text = f.read_text(errors="ignore")
+            if re.search(
+                r"(?:[A-Za-z0-9_]+CTF|flag|ctf)\{[^}\n]+\}",
+                text,
+                re.IGNORECASE,
+            ):
+                findings.append(str(f.relative_to(ROOT)))
+    print(
+        json.dumps(
+            {"observational_only": True, "files_with_flag_like_values": findings},
+            indent=2,
+        )
+    )
+    return 0
+
+
+def redaction_scan(args):
+    print(
+        json.dumps(
+            {
+                "disabled": True,
+                "message": "No live redaction. This compatibility command mutates nothing.",
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    x = sub.add_parser("report-new")
+    x.add_argument("objective")
+    x.add_argument("wave")
+    x.add_argument("topic")
+    x.add_argument("--agent-id")
+    x.add_argument("--scope", default="")
+    x.add_argument("--category", default="unknown")
+    x.set_defaults(func=report_new)
+    x = sub.add_parser("report-lint")
+    x.add_argument("paths", nargs="+")
+    x.set_defaults(func=report_lint)
+    x = sub.add_parser("evidence-add")
+    x.add_argument("objective")
+    x.add_argument("path")
+    x.add_argument("--type", default="artifact")
+    x.add_argument("--source-url", default="")
+    x.add_argument("--role", default="")
+    x.set_defaults(func=evidence_add)
+    x = sub.add_parser("query-ledger")
+    qs = x.add_subparsers(dest="qcmd", required=True)
+    y = qs.add_parser("search")
+    y.add_argument("objective")
+    y.add_argument("query")
+    y.add_argument("--categories", default="general,it")
+    y.add_argument("--top", type=int, default=5)
+    y.add_argument("--force", action="store_true")
+    y.set_defaults(func=query_ledger)
+    y = qs.add_parser("stats")
+    y.set_defaults(func=query_ledger)
+    x = sub.add_parser("knowledge")
+    ks = x.add_subparsers(dest="kcmd", required=True)
+    y = ks.add_parser("ingest")
+    y.add_argument("paths", nargs="+")
+    y.set_defaults(func=knowledge)
+    y = ks.add_parser("search")
+    y.add_argument("query")
+    y.add_argument("--limit", type=int, default=10)
+    y.set_defaults(func=knowledge)
+    y = ks.add_parser("stats")
+    y.set_defaults(func=knowledge)
+    x = sub.add_parser("digest")
+    x.add_argument("path", nargs="?", default="-")
+    x.add_argument("--json", action="store_true")
+    x.add_argument("--max-bytes", type=int, default=64 * 1024 * 1024)
+    x.set_defaults(func=digest)
+    x = sub.add_parser("runq")
+    x.add_argument("-t", "--timeout", type=int, default=60)
+    x.add_argument("-l", "--label", default="cmd")
+    x.add_argument("-p", "--print-output", action="store_true")
+    x.add_argument("--mutation", action="store_true")
+    x.add_argument("--max-output-bytes", type=int, default=DEFAULT_MAX_OUTPUT_BYTES)
+    x.add_argument("--attempt-id", default="")
+    x.add_argument("--parent-attempt-id", default="")
+    x.add_argument("--proposal-id", default="")
+    x.add_argument("--plan-id", default="")
+    x.add_argument("--scope-generation", type=int)
+    x.add_argument("--stop-generation", type=int)
+    x.add_argument("--scope-file-sha256", default="")
+    x.add_argument("--scope-content-sha256", default="")
+    x.add_argument("--launch-binding-sha256", default="")
+    x.add_argument("--pass-env", action="append", default=[])
+    x.add_argument("--env-policy", action="append", default=[])
+    x.add_argument("command", nargs=argparse.REMAINDER)
+    x.set_defaults(func=runq)
+    x = sub.add_parser("runbg")
+    x.add_argument("-l", "--label", default="job")
+    x.add_argument(
+        "-t",
+        "--timeout",
+        type=int,
+        default=DEFAULT_BACKGROUND_TIMEOUT_SECONDS,
+    )
+    x.add_argument(
+        "--max-output-bytes",
+        type=int,
+        default=MAX_BACKGROUND_OUTPUT_BYTES,
+    )
+    x.add_argument("--pass-env", action="append", default=[])
+    x.add_argument("--env-policy", action="append", default=[])
+    x.add_argument("command", nargs=argparse.REMAINDER)
+    x.set_defaults(func=runbg)
+    x = sub.add_parser("jobs")
+    x.set_defaults(func=jobs)
+    x = sub.add_parser("job-tail")
+    x.add_argument("job_id")
+    x.add_argument("-n", "--lines", type=int, default=80)
+    x.set_defaults(func=job_tail)
+    x = sub.add_parser("job-kill")
+    x.add_argument("job_id")
+    x.set_defaults(func=job_kill)
+    x = sub.add_parser("evidence-scan")
+    x.add_argument("paths", nargs="*")
+    x.add_argument("--max-files", type=int, default=5000)
+    x.set_defaults(func=evidence_scan)
+    x = sub.add_parser("redaction-scan")
+    x.add_argument("paths", nargs="*")
+    x.set_defaults(func=redaction_scan)
+    args = ap.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

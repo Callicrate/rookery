@@ -1,0 +1,901 @@
+[
+  {
+    "admission": {
+      "capability_gap": "bounded agent harvester work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_agent_harvester:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_agent_harvester.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_agent_harvester",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ],
+    "source": "agents/catalog/ctf_agent_harvester.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded artifact evidence linter work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_artifact_evidence_linter:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_artifact_evidence_linter.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_artifact_evidence_linter",
+    "requires_all": [],
+    "requires_any": [
+      "evidence-quality"
+    ],
+    "source": "agents/catalog/ctf_artifact_evidence_linter.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded artifact librarian work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_artifact_librarian:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_artifact_librarian.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_artifact_librarian",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ],
+    "source": "agents/catalog/ctf_artifact_librarian.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded attempt reconciler work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_attempt_reconciler:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_attempt_reconciler.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_attempt_reconciler",
+    "requires_all": [],
+    "requires_any": [
+      "dynamic-attempts"
+    ],
+    "source": "agents/catalog/ctf_attempt_reconciler.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded attempt scope guard work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_attempt_scope_guard:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_attempt_scope_guard.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_attempt_scope_guard",
+    "requires_all": [],
+    "requires_any": [
+      "platform-sessions"
+    ],
+    "source": "agents/catalog/ctf_attempt_scope_guard.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded auth pause steward work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_auth_pause_steward:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_auth_pause_steward.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_auth_pause_steward",
+    "requires_all": [],
+    "requires_any": [
+      "platform-sessions"
+    ],
+    "source": "agents/catalog/ctf_auth_pause_steward.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded autopilot coordinator work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_autopilot_coordinator:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_autopilot_coordinator.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_autopilot_coordinator",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ],
+    "source": "agents/catalog/ctf_autopilot_coordinator.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded blockchain operator work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_blockchain_operator:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_blockchain_operator.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_blockchain_operator",
+    "requires_all": [],
+    "requires_any": [
+      "blockchain"
+    ],
+    "source": "agents/catalog/ctf_blockchain_operator.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded category classifier work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_category_classifier:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_category_classifier.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_category_classifier",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ],
+    "source": "agents/catalog/ctf_category_classifier.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded cleanup steward work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_cleanup_steward:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_cleanup_steward.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_cleanup_steward",
+    "requires_all": [],
+    "requires_any": [
+      "cleanup"
+    ],
+    "source": "agents/catalog/ctf_cleanup_steward.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded cloud infra operator work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_cloud_infra_operator:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_cloud_infra_operator.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_cloud_infra_operator",
+    "requires_all": [],
+    "requires_any": [
+      "cloud"
+    ],
+    "source": "agents/catalog/ctf_cloud_infra_operator.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded completion writeup scribe work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_completion_writeup_scribe:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_completion_writeup_scribe.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_completion_writeup_scribe",
+    "requires_all": [],
+    "requires_any": [
+      "writeups"
+    ],
+    "source": "agents/catalog/ctf_completion_writeup_scribe.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded confusion brake work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_confusion_brake:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_confusion_brake.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_confusion_brake",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ],
+    "source": "agents/catalog/ctf_confusion_brake.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded context digestor work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_context_digestor:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_context_digestor.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_context_digestor",
+    "requires_all": [],
+    "requires_any": [
+      "advanced-research"
+    ],
+    "source": "agents/catalog/ctf_context_digestor.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded cookie preflight gate work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_cookie_preflight_gate:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_cookie_preflight_gate.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_cookie_preflight_gate",
+    "requires_all": [],
+    "requires_any": [
+      "platform-sessions"
+    ],
+    "source": "agents/catalog/ctf_cookie_preflight_gate.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded credential cartographer work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_credential_cartographer:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_credential_cartographer.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_credential_cartographer",
+    "requires_all": [],
+    "requires_any": [
+      "credentials"
+    ],
+    "source": "agents/catalog/ctf_credential_cartographer.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded crypto alchemist work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_crypto_alchemist:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_crypto_alchemist.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_crypto_alchemist",
+    "requires_all": [],
+    "requires_any": [
+      "crypto"
+    ],
+    "source": "agents/catalog/ctf_crypto_alchemist.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded decoder bench operator work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_decoder_bench_operator:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_decoder_bench_operator.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_decoder_bench_operator",
+    "requires_all": [],
+    "requires_any": [
+      "misc"
+    ],
+    "source": "agents/catalog/ctf_decoder_bench_operator.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded direct override guard work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_direct_override_guard:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_direct_override_guard.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_direct_override_guard",
+    "requires_all": [],
+    "requires_any": [
+      "advanced-scoring-review"
+    ],
+    "source": "agents/catalog/ctf_direct_override_guard.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded flag proposal verifier work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_flag_proposal_verifier:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_flag_proposal_verifier.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_flag_proposal_verifier",
+    "requires_all": [],
+    "requires_any": [
+      "scoring-review"
+    ],
+    "source": "agents/catalog/ctf_flag_proposal_verifier.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded flag review critic work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_flag_review_critic:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_flag_review_critic.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_flag_review_critic",
+    "requires_all": [],
+    "requires_any": [
+      "advanced-scoring-review"
+    ],
+    "source": "agents/catalog/ctf_flag_review_critic.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded flag verifier work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_flag_verifier:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_flag_verifier.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_flag_verifier",
+    "requires_all": [],
+    "requires_any": [
+      "advanced-scoring-review"
+    ],
+    "source": "agents/catalog/ctf_flag_verifier.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded forensics monk work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_forensics_monk:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_forensics_monk.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_forensics_monk",
+    "requires_all": [],
+    "requires_any": [
+      "forensics"
+    ],
+    "source": "agents/catalog/ctf_forensics_monk.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded fuzz seedsmith work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_fuzz_seedsmith:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_fuzz_seedsmith.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_fuzz_seedsmith",
+    "requires_all": [],
+    "requires_any": [
+      "fuzzing"
+    ],
+    "source": "agents/catalog/ctf_fuzz_seedsmith.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded goal state reconciler work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_goal_state_reconciler:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_goal_state_reconciler.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_goal_state_reconciler",
+    "requires_all": [],
+    "requires_any": [
+      "state-control"
+    ],
+    "source": "agents/catalog/ctf_goal_state_reconciler.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded grind runner work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_grind_runner:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_grind_runner.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_grind_runner",
+    "requires_all": [],
+    "requires_any": [
+      "grind"
+    ],
+    "source": "agents/catalog/ctf_grind_runner.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded hard investigator work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_hard_investigator:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_hard_investigator.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_hard_investigator",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ],
+    "source": "agents/catalog/ctf_hard_investigator.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded hardware signal analyst work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_hardware_signal_analyst:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_hardware_signal_analyst.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_hardware_signal_analyst",
+    "requires_all": [],
+    "requires_any": [
+      "hardware"
+    ],
+    "source": "agents/catalog/ctf_hardware_signal_analyst.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded ics protocol operator work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_ics_protocol_operator:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_ics_protocol_operator.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_ics_protocol_operator",
+    "requires_all": [],
+    "requires_any": [
+      "ics"
+    ],
+    "source": "agents/catalog/ctf_ics_protocol_operator.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded independent review auditor work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_independent_review_auditor:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_independent_review_auditor.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_independent_review_auditor",
+    "requires_all": [],
+    "requires_any": [
+      "advanced-scoring-review"
+    ],
+    "source": "agents/catalog/ctf_independent_review_auditor.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded infra operator work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_infra_operator:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_infra_operator.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_infra_operator",
+    "requires_all": [],
+    "requires_any": [
+      "infrastructure"
+    ],
+    "source": "agents/catalog/ctf_infra_operator.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded knowledge researcher work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_knowledge_researcher:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_knowledge_researcher.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_knowledge_researcher",
+    "requires_all": [],
+    "requires_any": [
+      "research"
+    ],
+    "source": "agents/catalog/ctf_knowledge_researcher.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded live range scout work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_live_range_scout:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_live_range_scout.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_live_range_scout",
+    "requires_all": [],
+    "requires_any": [
+      "network"
+    ],
+    "source": "agents/catalog/ctf_live_range_scout.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded misc decoder work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_misc_decoder:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_misc_decoder.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_misc_decoder",
+    "requires_all": [],
+    "requires_any": [
+      "misc"
+    ],
+    "source": "agents/catalog/ctf_misc_decoder.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded mutation audit verifier work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_mutation_audit_verifier:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_mutation_audit_verifier.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_mutation_audit_verifier",
+    "requires_all": [],
+    "requires_any": [
+      "advanced-scoring-review"
+    ],
+    "source": "agents/catalog/ctf_mutation_audit_verifier.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded naive breaker work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_naive_breaker:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_naive_breaker.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_naive_breaker",
+    "requires_all": [],
+    "requires_any": [
+      "advanced-unstick"
+    ],
+    "source": "agents/catalog/ctf_naive_breaker.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded naive context work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_naive_context:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_naive_context.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_naive_context",
+    "requires_all": [],
+    "requires_any": [
+      "advanced-unstick"
+    ],
+    "source": "agents/catalog/ctf_naive_context.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded naive minimalist work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_naive_minimalist:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_naive_minimalist.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_naive_minimalist",
+    "requires_all": [],
+    "requires_any": [
+      "unstick"
+    ],
+    "source": "agents/catalog/ctf_naive_minimalist.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded naive skeptic work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_naive_skeptic:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_naive_skeptic.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_naive_skeptic",
+    "requires_all": [],
+    "requires_any": [
+      "unstick"
+    ],
+    "source": "agents/catalog/ctf_naive_skeptic.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded naive workbench work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_naive_workbench:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_naive_workbench.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_naive_workbench",
+    "requires_all": [],
+    "requires_any": [
+      "advanced-unstick"
+    ],
+    "source": "agents/catalog/ctf_naive_workbench.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded named tool scout work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_named_tool_scout:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_named_tool_scout.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_named_tool_scout",
+    "requires_all": [],
+    "requires_any": [
+      "practical-lab"
+    ],
+    "source": "agents/catalog/ctf_named_tool_scout.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded near miss probe worker work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_near_miss_probe_worker:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_near_miss_probe_worker.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_near_miss_probe_worker",
+    "requires_all": [],
+    "requires_any": [
+      "advanced-scoring-review"
+    ],
+    "source": "agents/catalog/ctf_near_miss_probe_worker.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded partial objective scribe work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_partial_objective_scribe:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_partial_objective_scribe.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_partial_objective_scribe",
+    "requires_all": [],
+    "requires_any": [
+      "advanced-writeups"
+    ],
+    "source": "agents/catalog/ctf_partial_objective_scribe.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded platform scout work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_platform_scout:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_platform_scout.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_platform_scout",
+    "requires_all": [],
+    "requires_any": [
+      "platform_inventory"
+    ],
+    "source": "agents/catalog/ctf_platform_scout.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded playful disruptor work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_playful_disruptor:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_playful_disruptor.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_playful_disruptor",
+    "requires_all": [],
+    "requires_any": [
+      "unstick"
+    ],
+    "source": "agents/catalog/ctf_playful_disruptor.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded policy boundary classifier work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_policy_boundary_classifier:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_policy_boundary_classifier.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_policy_boundary_classifier",
+    "requires_all": [],
+    "requires_any": [
+      "state-control"
+    ],
+    "source": "agents/catalog/ctf_policy_boundary_classifier.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded powershell deobfuscator work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_powershell_deobfuscator:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_powershell_deobfuscator.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_powershell_deobfuscator",
+    "requires_all": [],
+    "requires_any": [
+      "windows"
+    ],
+    "source": "agents/catalog/ctf_powershell_deobfuscator.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded protocol mapper work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_protocol_mapper:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_protocol_mapper.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_protocol_mapper",
+    "requires_all": [],
+    "requires_any": [
+      "protocol"
+    ],
+    "source": "agents/catalog/ctf_protocol_mapper.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded pwn blacksmith work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_pwn_blacksmith:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_pwn_blacksmith.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_pwn_blacksmith",
+    "requires_all": [],
+    "requires_any": [
+      "pwn"
+    ],
+    "source": "agents/catalog/ctf_pwn_blacksmith.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded query deduper work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_query_deduper:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_query_deduper.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_query_deduper",
+    "requires_all": [],
+    "requires_any": [
+      "research"
+    ],
+    "source": "agents/catalog/ctf_query_deduper.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded readonly api scout work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_readonly_api_scout:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_readonly_api_scout.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_readonly_api_scout",
+    "requires_all": [],
+    "requires_any": [
+      "platform_inventory"
+    ],
+    "source": "agents/catalog/ctf_readonly_api_scout.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded real prioritizer work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_real_ctf_prioritizer:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_real_ctf_prioritizer.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_real_ctf_prioritizer",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ],
+    "source": "agents/catalog/ctf_real_ctf_prioritizer.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded rev cartographer work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_rev_cartographer:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_rev_cartographer.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_rev_cartographer",
+    "requires_all": [],
+    "requires_any": [
+      "rev"
+    ],
+    "source": "agents/catalog/ctf_rev_cartographer.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded scheduled retry scout work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_scheduled_retry_scout:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_scheduled_retry_scout.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_scheduled_retry_scout",
+    "requires_all": [],
+    "requires_any": [
+      "retries"
+    ],
+    "source": "agents/catalog/ctf_scheduled_retry_scout.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded scoring state steward work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_scoring_state_steward:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_scoring_state_steward.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_scoring_state_steward",
+    "requires_all": [],
+    "requires_any": [
+      "advanced-scoring-review"
+    ],
+    "source": "agents/catalog/ctf_scoring_state_steward.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded search guardian work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_search_guardian:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_search_guardian.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_search_guardian",
+    "requires_all": [],
+    "requires_any": [
+      "advanced-research"
+    ],
+    "source": "agents/catalog/ctf_search_guardian.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded searxng researcher work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_searxng_researcher:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_searxng_researcher.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_searxng_researcher",
+    "requires_all": [
+      "searxng"
+    ],
+    "requires_any": [
+      "research"
+    ],
+    "source": "agents/catalog/ctf_searxng_researcher.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded session health gate work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_session_health_gate:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_session_health_gate.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_session_health_gate",
+    "requires_all": [],
+    "requires_any": [
+      "platform-sessions"
+    ],
+    "source": "agents/catalog/ctf_session_health_gate.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded shell sprinter work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_shell_sprinter:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_shell_sprinter.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_shell_sprinter",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ],
+    "source": "agents/catalog/ctf_shell_sprinter.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded source chain verifier work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_source_chain_verifier:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_source_chain_verifier.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_source_chain_verifier",
+    "requires_all": [],
+    "requires_any": [
+      "advanced-research"
+    ],
+    "source": "agents/catalog/ctf_source_chain_verifier.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded state steward work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_state_steward:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_state_steward.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_state_steward",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ],
+    "source": "agents/catalog/ctf_state_steward.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded stop closer work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_stop_closer:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_stop_closer.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_stop_closer",
+    "requires_all": [],
+    "requires_any": [
+      "core"
+    ],
+    "source": "agents/catalog/ctf_stop_closer.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded stop lessons scribe work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_stop_lessons_scribe:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_stop_lessons_scribe.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_stop_lessons_scribe",
+    "requires_all": [],
+    "requires_any": [
+      "stop-closeout"
+    ],
+    "source": "agents/catalog/ctf_stop_lessons_scribe.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded submission budget steward work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_submission_budget_steward:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_submission_budget_steward.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_submission_budget_steward",
+    "requires_all": [],
+    "requires_any": [
+      "advanced-scoring-review"
+    ],
+    "source": "agents/catalog/ctf_submission_budget_steward.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded toolsmith work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_toolsmith:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_toolsmith.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_toolsmith",
+    "requires_all": [],
+    "requires_any": [
+      "tooling"
+    ],
+    "source": "agents/catalog/ctf_toolsmith.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded unlock ingest scout work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_unlock_ingest_scout:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_unlock_ingest_scout.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_unlock_ingest_scout",
+    "requires_all": [],
+    "requires_any": [
+      "platform_inventory"
+    ],
+    "source": "agents/catalog/ctf_unlock_ingest_scout.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded verdict integrity guard work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_verdict_integrity_guard:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_verdict_integrity_guard.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_verdict_integrity_guard",
+    "requires_all": [],
+    "requires_any": [
+      "scoring-review"
+    ],
+    "source": "agents/catalog/ctf_verdict_integrity_guard.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded web pathfinder work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_web_pathfinder:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_web_pathfinder.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_web_pathfinder",
+    "requires_all": [],
+    "requires_any": [
+      "web"
+    ],
+    "source": "agents/catalog/ctf_web_pathfinder.toml"
+  },
+  {
+    "admission": {
+      "capability_gap": "bounded writeup scribe work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_writeup_scribe:one-owner-one-report-path",
+      "evidence": "Rookery role catalog entry ctf_writeup_scribe.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_writeup_scribe",
+    "requires_all": [],
+    "requires_any": [
+      "advanced-writeups"
+    ],
+    "source": "agents/catalog/ctf_writeup_scribe.toml"
+  }
+]

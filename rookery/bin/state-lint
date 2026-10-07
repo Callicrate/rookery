@@ -1,0 +1,30 @@
+#!/usr/bin/env -S python3 -I -B
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+
+root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(root / "lib"))
+from rookery.portable.store import EventStore  # noqa: E402
+
+store = EventStore(root)
+p = store.rebuild()
+errors = []
+for pid, row in p["current"].get("proposals", {}).items():
+    for key in ["source", "artifact_reference"]:
+        value = row.get(key)
+        if value and not (root / value).exists():
+            errors.append(f"{pid}: dangling {key}={value}")
+for pid, row in p["current"].get("reviews", {}).items():
+    value = row.get("verifier_report")
+    if value and not (root / value).exists():
+        errors.append(f"{pid}: dangling verifier_report={value}")
+for cid, row in p["current"].get("challenges", {}).items():
+    if row.get("classification") in {"policy_blocked", "operator_only"} and not row.get("policy_reason"):
+        errors.append(f"{cid}: restricted without policy_reason")
+print(json.dumps({"ok": not errors, "errors": errors}, indent=2))
+raise SystemExit(0 if not errors else 1)

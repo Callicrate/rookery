@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+case "${1:-status}" in
+  status) exec "$ROOT/bin/rookery" score status ;;
+  submit)
+    shift
+    proposal=${1:?proposal id required}
+    "$ROOT/bin/rookery" score authorize-exact "$proposal" --reason "manual exact proposal submit"
+    plan_json=$("$ROOT/bin/rookery" score plan "$proposal")
+    plan_id=$(printf '%s' "$plan_json" | python3 -I -S -B -c 'import json,sys; print(json.load(sys.stdin)["plan_id"])')
+    exec "$ROOT/bin/rookery" score execute "$plan_id"
+    ;;
+  *) echo "usage: flag-review [status|submit <proposal_id>]" >&2; exit 2 ;;
+esac

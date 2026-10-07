@@ -1,0 +1,110 @@
+#!/usr/bin/env -S python3 -I -B
+from __future__ import annotations
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path.cwd()
+UTC = dt.timezone.utc
+SCRIPT_ROOT = Path(__file__).resolve().parents[1]
+if str(SCRIPT_ROOT / "lib") not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+
+from rookery.portable.util import (  # noqa: E402
+    ensure_private_dir as _ensure_private_dir,
+    ensure_private_file as _ensure_private_file,
+)
+
+
+def iso():
+    return dt.datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def safe(s):
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(s)).strip("_") or "unknown"
+
+
+def jread(p, d):
+    try:
+        return json.loads(p.read_text(errors="replace"))
+    except Exception:
+        return d
+
+
+def jwrite(p, o):
+    private_file(p)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    private_file(tmp)
+    tmp.write_text(json.dumps(o, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+    os.chmod(tmp, 0o600)
+    tmp.replace(p)
+    os.chmod(p, 0o600)
+
+
+def append_jsonl(p, o):
+    private_file(p)
+    with p.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(o, ensure_ascii=False, sort_keys=True) + "\n")
+    os.chmod(p, 0o600)
+
+
+def private_dir(p):
+    _ensure_private_dir(p)
+
+
+def private_file(p):
+    _ensure_private_dir(p.parent)
+    _ensure_private_file(p)
+
+
+def main():
+    os.umask(0o077)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("challenge")
+    ap.add_argument(
+        "classification",
+        choices=[
+            "active",
+            "parked",
+            "blocked",
+            "operator_only",
+            "policy_blocked",
+            "solved",
+            "rejected-route",
+        ],
+    )
+    ap.add_argument("--reason", required=True)
+    ap.add_argument("--source", default="operator/coordinator note")
+    args = ap.parse_args()
+    p = ROOT / "state/challenges" / f"{safe(args.challenge)}.json"
+    d = jread(p, {"id": args.challenge})
+    d.update(
+        {
+            "classification": args.classification,
+            "policy_restricted": args.classification
+            in ("operator_only", "policy_blocked"),
+            "policy_reason": args.reason,
+            "policy_source": args.source,
+            "updated_at": iso(),
+        }
+    )
+    jwrite(p, d)
+    append_jsonl(
+        ROOT / "state/policy_events.jsonl",
+        {
+            "created_at": iso(),
+            "challenge": args.challenge,
+            "classification": args.classification,
+            "reason": args.reason,
+            "source": args.source,
+        },
+    )
+    print(f"{args.challenge}: {args.classification}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

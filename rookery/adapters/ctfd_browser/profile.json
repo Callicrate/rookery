@@ -1,0 +1,52 @@
+{
+  "adapter": {
+    "config": {
+      "session_lease_seconds": 60,
+      "timeout": 30
+    },
+    "id": "ctfd_browser"
+  },
+  "capabilities": {
+    "optional": [
+      "release_changes",
+      "network",
+      "collaboration",
+      "browser_cdp",
+      "browser_bidi"
+    ],
+    "required": [
+      "local_shell",
+      "browser_remote",
+      "platform_inventory",
+      "challenge_details",
+      "scoring"
+    ]
+  },
+  "profile": "ctfd_browser",
+  "release": {
+    "model": "poll",
+    "poll_seconds": 60
+  },
+  "session": {
+    "dynamic_attempts": false,
+    "lifecycle": "browser-session",
+    "required_freshness_seconds": 900
+  },
+  "scoring": {
+    "completion_mode": "scorer_truth",
+    "action_kinds": [
+      "flag",
+      "free_text",
+      "no_submit_evidence"
+    ]
+  },
+  "surface": {
+    "bundles": [
+      "core",
+      "research",
+      "scoring-review",
+      "writeups",
+      "unstick"
+    ]
+  }
+}

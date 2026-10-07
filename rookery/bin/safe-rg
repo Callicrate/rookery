@@ -1,0 +1,155 @@
+#!/usr/bin/env -S python3 -I -B
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import shlex
+import shutil
+import sys
+from pathlib import Path
+
+ROOT = Path.cwd()
+UTC = dt.timezone.utc
+SCRIPT_ROOT = Path(__file__).resolve().parents[1]
+if str(SCRIPT_ROOT / "lib") not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+
+from rookery.portable.adapters import run_bounded_argv
+from rookery.portable.environment import minimal_child_environment
+from rookery.portable.util import (
+    ensure_private_dir as _ensure_private_dir,
+)
+from rookery.portable.util import (
+    ensure_private_file as _ensure_private_file,
+)
+
+DEFAULT_EXCLUDES = [
+    "evidence/**/frames/**",
+    "evidence/**/streams/**",
+    "platform/**/transcript*",
+    "platform/**/event-streams/**",
+    "**/*.bundle.js",
+    "**/*.map",
+    "**/node_modules/**",
+    "**/.git/**",
+    "**/__pycache__/**",
+    "**/*.pcap",
+    "**/*.pcapng",
+    "**/*.mp4",
+    "**/*.webm",
+    "**/*.mov",
+    "**/*.avi",
+    "**/*.zip",
+    "**/*.7z",
+    "**/*.tar",
+    "**/*.gz",
+]
+
+
+def iso():
+    return dt.datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def stamp():
+    return dt.datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def mkdir(p: Path):
+    _ensure_private_dir(p)
+
+
+def private_file(p: Path):
+    _ensure_private_dir(p.parent)
+    _ensure_private_file(p)
+
+
+def write_text(p: Path, text: str, **kwargs):
+    private_file(p)
+    p.write_text(text, **kwargs)
+    os.chmod(p, 0o600)
+
+
+def jwrite(p: Path, obj):
+    private_file(p)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    write_text(tmp, json.dumps(obj, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+    tmp.replace(p)
+    os.chmod(p, 0o600)
+
+
+def main():
+    os.umask(0o077)
+    ap = argparse.ArgumentParser(
+        description="ripgrep with CTF evidence search guards and saved compact output."
+    )
+    ap.add_argument("pattern")
+    ap.add_argument("paths", nargs="*", default=["."])
+    ap.add_argument("--raw", action="store_true", help="disable default excludes")
+    ap.add_argument("--max-count", type=int, default=4000)
+    ap.add_argument("--max-bytes", type=int, default=2_000_000)
+    ap.add_argument("--extra", default="", help="extra rg args as one shell string")
+    args = ap.parse_args()
+    if not shutil.which("rg"):
+        print("rg not found", file=sys.stderr)
+        return 127
+    environment = minimal_child_environment(ROOT, policy_name="safe-rg")
+    outdir = ROOT / "research/search_guard" / stamp()
+    mkdir(outdir)
+    cmd = ["rg", "-n", "--hidden", "--no-messages", "--max-count", str(args.max_count)]
+    if not args.raw:
+        for ex in DEFAULT_EXCLUDES:
+            cmd += ["-g", "!" + ex]
+    if args.extra:
+        cmd += shlex.split(args.extra)
+    cmd += [args.pattern] + args.paths
+    meta = {
+        "created_at": iso(),
+        "pattern": args.pattern,
+        "paths": args.paths,
+        "raw": args.raw,
+        "command": cmd,
+        "outdir": str(outdir),
+    }
+    cp = run_bounded_argv(
+        cmd,
+        cwd=ROOT,
+        timeout=300,
+        max_output_bytes=args.max_bytes,
+        env=environment,
+    )
+    stdout = cp.stdout.decode("utf-8", errors="replace")
+    stderr = cp.stderr.decode("utf-8", errors="replace")
+    truncated = cp.termination == "output_limit"
+    write_text(outdir / "stdout.txt", stdout, encoding="utf-8", errors="replace")
+    write_text(outdir / "stderr.txt",
+        stderr, encoding="utf-8", errors="replace"
+    )
+    meta.update(
+        {
+            "returncode": cp.returncode,
+            "termination": cp.termination,
+            "stdout_path": str(outdir / "stdout.txt"),
+            "stderr_path": str(outdir / "stderr.txt"),
+            "truncated": truncated,
+            "line_count": stdout.count("\n"),
+            "environment": cp.metadata()["environment"],
+        }
+    )
+    jwrite(outdir / "meta.json", meta)
+    # print compact output only
+    print(stdout)
+    print(
+        f"\n[safe-rg] saved={outdir} rc={cp.returncode} lines={meta['line_count']} truncated={truncated}",
+        file=sys.stderr,
+    )
+    return (
+        0
+        if cp.returncode in (0, 1) or cp.termination == "output_limit"
+        else cp.returncode or 1
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

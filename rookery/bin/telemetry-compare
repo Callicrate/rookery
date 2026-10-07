@@ -1,0 +1,17 @@
+#!/usr/bin/env -S python3 -I -B
+"""Standalone entry point for a read-only Rookery telemetry comparison."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "lib") not in sys.path:
+    sys.path.insert(0, str(ROOT / "lib"))
+
+from rookery.portable.telemetry_compare import main  # noqa: E402
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,450 @@
+#!/usr/bin/env -S python3 -I -B
+from __future__ import annotations
+import argparse
+import datetime as dt
+import heapq
+import importlib.util
+import json
+import os
+import shutil
+import sys
+import warnings
+from pathlib import Path
+
+SOURCE_ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path.cwd()
+UTC = dt.timezone.utc
+sys.path.insert(0, str(SOURCE_ROOT / "lib"))
+EXTENSION_ROOT = Path(__file__).resolve().parents[1]
+
+from rookery.portable.adapters import run_bounded_argv  # noqa: E402
+from rookery.portable.environment import EnvironmentPolicyError  # noqa: E402
+from rookery.portable.optional_helper import require_bound_runtime_workspace  # noqa: E402
+
+
+def _load_extension_module(name: str):
+    """Load one colocated extension module without admitting it to sys.path."""
+
+    path = EXTENSION_ROOT / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"_rookery_guac_{name}", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("unable to load required Guacamole helper module")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_guac_environment = _load_extension_module("guac_environment")
+_guac_paths = _load_extension_module("guac_paths")
+guac_minimal_environment = _guac_environment.guac_minimal_environment
+read_guac_configuration = _guac_environment.read_guac_configuration
+GuacOutput = _guac_paths.GuacOutput
+GuacOutputPathError = _guac_paths.GuacOutputPathError
+resolve_guac_output = _guac_paths.resolve_guac_output
+
+DEFAULT_MAX_DISCOVERED_FILES = 4096
+MAX_DISCOVERED_FILES = 100_000
+MAX_LAST = 64
+DEFAULT_MAX_FILE_BYTES = 8 * 1024 * 1024
+DEFAULT_MAX_SOURCE_BYTES = 64 * 1024 * 1024
+DEFAULT_MAX_PIXELS = 16_000_000
+DEFAULT_MAX_TOTAL_PIXELS = 64_000_000
+DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024
+MAX_BYTES = 512 * 1024 * 1024
+MAX_PIXELS = 256_000_000
+MAX_TOOL_TIMEOUT = 300
+TOOL_OUTPUT_BYTES = 64 * 1024
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+
+
+class InputLimitError(RuntimeError):
+    pass
+
+
+def iso():
+    return dt.datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def stamp():
+    return dt.datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def jwrite(output: GuacOutput, name: str, obj):
+    output.write_text(
+        name, json.dumps(obj, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    )
+
+
+def validate_limit(name: str, value: int, maximum: int) -> int:
+    if value <= 0 or value > maximum:
+        raise ValueError(f"{name} must be between 1 and {maximum}")
+    return value
+
+
+def discover_recent_images(
+    source: Path,
+    *,
+    last: int,
+    max_discovered_files: int,
+    max_file_bytes: int,
+    max_source_bytes: int,
+) -> tuple[list[tuple[Path, int]], int]:
+    if not source.exists():
+        return [], 0
+    if not source.is_dir() or source.is_symlink():
+        raise InputLimitError("source_type")
+    heap: list[tuple[int, int, Path, int]] = []
+    stack = [os.scandir(source)]
+    discovered = 0
+    sequence = 0
+    try:
+        while stack:
+            iterator = stack[-1]
+            try:
+                entry = next(iterator)
+            except StopIteration:
+                iterator.close()
+                stack.pop()
+                continue
+            discovered += 1
+            if discovered > max_discovered_files:
+                raise InputLimitError("discovered_files")
+            if entry.is_symlink():
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                stack.append(os.scandir(entry.path))
+                continue
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            path = Path(entry.path)
+            if path.suffix.lower() not in IMAGE_SUFFIXES:
+                continue
+            info = entry.stat(follow_symlinks=False)
+            size = int(info.st_size)
+            if size > max_file_bytes:
+                raise InputLimitError("file_bytes")
+            item = (int(info.st_mtime_ns), sequence, path, size)
+            sequence += 1
+            if len(heap) < last:
+                heapq.heappush(heap, item)
+            elif item[:2] > heap[0][:2]:
+                heapq.heapreplace(heap, item)
+    finally:
+        for iterator in stack:
+            iterator.close()
+    selected = [(item[2], item[3]) for item in sorted(heap)]
+    total = sum(size for _path, size in selected)
+    if total > max_source_bytes:
+        raise InputLimitError("source_bytes")
+    return selected, discovered
+
+
+def publish_output(output: GuacOutput, temporary: Path, name: str, max_output_bytes: int) -> int:
+    try:
+        return output.publish_temporary(temporary, name, maximum=max_output_bytes)
+    except GuacOutputPathError as error:
+        if "configured byte limit" in str(error):
+            raise InputLimitError("output_bytes") from error
+        raise
+
+
+def render_with_pillow(
+    images: list[tuple[Path, int]],
+    temporary: Path,
+    *,
+    max_pixels: int,
+    max_total_pixels: int,
+) -> None:
+    from PIL import Image, ImageDraw  # type: ignore
+
+    Image.MAX_IMAGE_PIXELS = max_pixels
+    thumbs = []
+    total_pixels = 0
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", Image.DecompressionBombWarning)
+        for path, _size in images:
+            try:
+                with Image.open(path) as source:
+                    width, height = source.size
+                    pixels = width * height
+                    if width <= 0 or height <= 0 or pixels > max_pixels:
+                        raise InputLimitError("decoded_pixels")
+                    total_pixels += pixels
+                    if total_pixels > max_total_pixels:
+                        raise InputLimitError("total_decoded_pixels")
+                    converted = source.convert("RGB")
+            except (Image.DecompressionBombError, Image.DecompressionBombWarning) as error:
+                raise InputLimitError("decoded_pixels") from error
+            converted.thumbnail((320, 200))
+            canvas = Image.new("RGB", (340, 230), "white")
+            canvas.paste(converted, ((340 - converted.width) // 2, 10))
+            ImageDraw.Draw(canvas).text((8, 212), path.name[:45], fill=(0, 0, 0))
+            converted.close()
+            thumbs.append(canvas)
+    cols = 3
+    rows = (len(thumbs) + cols - 1) // cols
+    output = Image.new("RGB", (cols * 340, rows * 230), "white")
+    try:
+        for index, thumb in enumerate(thumbs):
+            output.paste(thumb, ((index % cols) * 340, (index // cols) * 230))
+        output.save(temporary, format="JPEG", quality=88)
+    finally:
+        output.close()
+        for thumb in thumbs:
+            thumb.close()
+
+
+def render_with_imagemagick(
+    images: list[tuple[Path, int]],
+    temporary: Path,
+    *,
+    max_pixels: int,
+    max_source_bytes: int,
+    timeout: int,
+    environment,
+):
+    executable = shutil.which("montage", path=environment.values.get("PATH"))
+    if not executable:
+        return None
+    argv = [
+        executable,
+        "-limit",
+        "memory",
+        "64MiB",
+        "-limit",
+        "map",
+        "128MiB",
+        "-limit",
+        "disk",
+        str(max_source_bytes),
+        "-limit",
+        "area",
+        str(max_pixels),
+        "-limit",
+        "file",
+        str(MAX_LAST + 8),
+        "-limit",
+        "time",
+        str(timeout),
+        *[str(path) for path, _size in images],
+        "-geometry",
+        "320x200+8+20",
+        str(temporary),
+    ]
+    return run_bounded_argv(
+        argv,
+        cwd=ROOT,
+        timeout=timeout,
+        max_output_bytes=TOOL_OUTPUT_BYTES,
+        env=environment,
+    )
+
+
+def record_result(output: GuacOutput, record: dict) -> None:
+    jwrite(output, "manifest.json", record)
+
+
+def main():
+    os.umask(0o077)
+    ap = argparse.ArgumentParser(
+        description="Create a readable contact sheet from recent Guacamole/stream tile images."
+    )
+    ap.add_argument(
+        "--dir", default=None, help="stream/tile directory. Env: GUAC_STREAM_DIR"
+    )
+    ap.add_argument("--last", type=int, default=24)
+    ap.add_argument("--outdir", default=None)
+    ap.add_argument("--max-discovered-files", type=int, default=DEFAULT_MAX_DISCOVERED_FILES)
+    ap.add_argument("--max-file-bytes", type=int, default=DEFAULT_MAX_FILE_BYTES)
+    ap.add_argument("--max-source-bytes", type=int, default=DEFAULT_MAX_SOURCE_BYTES)
+    ap.add_argument("--max-pixels", type=int, default=DEFAULT_MAX_PIXELS)
+    ap.add_argument("--max-total-pixels", type=int, default=DEFAULT_MAX_TOTAL_PIXELS)
+    ap.add_argument("--max-output-bytes", type=int, default=DEFAULT_MAX_OUTPUT_BYTES)
+    ap.add_argument("--tool-timeout", type=int, default=30)
+    args = ap.parse_args()
+    require_bound_runtime_workspace(ROOT)
+    try:
+        validate_limit("last", args.last, MAX_LAST)
+        validate_limit("max-discovered-files", args.max_discovered_files, MAX_DISCOVERED_FILES)
+        validate_limit("max-file-bytes", args.max_file_bytes, MAX_BYTES)
+        validate_limit("max-source-bytes", args.max_source_bytes, MAX_BYTES)
+        validate_limit("max-pixels", args.max_pixels, MAX_PIXELS)
+        validate_limit("max-total-pixels", args.max_total_pixels, MAX_PIXELS)
+        validate_limit("max-output-bytes", args.max_output_bytes, MAX_BYTES)
+        validate_limit("tool-timeout", args.tool_timeout, MAX_TOOL_TIMEOUT)
+    except ValueError as error:
+        ap.error(str(error))
+    try:
+        configuration = read_guac_configuration(ROOT)
+        imagemagick_environment = guac_minimal_environment(
+            ROOT, policy_name="guac-contact-sheet-imagemagick-minimal"
+        )
+    except EnvironmentPolicyError as error:
+        ap.error(str(error))
+    src = Path(
+        args.dir
+        or configuration.get("GUAC_STREAM_DIR")
+        or "evidence/guac/stream"
+    )
+    try:
+        output = resolve_guac_output(
+            ROOT,
+            args.outdir or None,
+            default_parts=("contact-sheets", stamp()),
+        )
+        output.prepare()
+    except (GuacOutputPathError, OSError) as error:
+        ap.error(str(error))
+    outdir = output.path
+    manifest: dict[str, object] = {
+        "created_at": iso(),
+        "source_dir": str(src),
+        "status": "discovering",
+        "limits": {
+            "discovered_files": args.max_discovered_files,
+            "selected_images": MAX_LAST,
+            "file_bytes": args.max_file_bytes,
+            "source_bytes": args.max_source_bytes,
+            "pixels": args.max_pixels,
+            "total_pixels": args.max_total_pixels,
+            "output_bytes": args.max_output_bytes,
+            "tool_timeout": args.tool_timeout,
+        },
+    }
+    try:
+        images, discovered = discover_recent_images(
+            src,
+            last=args.last,
+            max_discovered_files=args.max_discovered_files,
+            max_file_bytes=args.max_file_bytes,
+            max_source_bytes=args.max_source_bytes,
+        )
+    except InputLimitError as error:
+        manifest.update({"status": "input_limit", "reason": str(error)})
+        record_result(output, manifest)
+        print(f"input_limit evidence={outdir}", file=sys.stderr)
+        return 2
+    manifest.update(
+        {
+            "discovered_count": discovered,
+            "image_count": len(images),
+            "source_bytes": sum(size for _path, size in images),
+            "images": [str(path) for path, _size in images],
+        }
+    )
+    if not images:
+        manifest["status"] = "no_images"
+        record_result(output, manifest)
+        output.write_text(
+            "README.txt",
+            "No images found. Set GUAC_STREAM_DIR or pass --dir.\n"
+        )
+        print(str(outdir))
+        return 1
+    temporary = output.temporary(".jpg")
+    try:
+        try:
+            render_with_pillow(
+                images,
+                temporary,
+                max_pixels=args.max_pixels,
+                max_total_pixels=args.max_total_pixels,
+            )
+            renderer = "pillow"
+        except (ImportError, OSError):
+            output.before_external_tool()
+            result = render_with_imagemagick(
+                images,
+                temporary,
+                max_pixels=args.max_pixels,
+                max_source_bytes=args.max_source_bytes,
+                timeout=args.tool_timeout,
+                environment=imagemagick_environment,
+            )
+            output.after_external_tool()
+            if result is not None:
+                manifest["environment"] = result.environment
+                if result.termination != "exited" or result.returncode != 0:
+                    manifest.update(
+                        {
+                            "status": "tool_timeout"
+                            if result.termination == "timeout"
+                            else "tool_failed",
+                            "renderer": "imagemagick",
+                            "termination": result.termination,
+                            "returncode": result.returncode,
+                        }
+                    )
+                    record_result(output, manifest)
+                    return 2
+                renderer = "imagemagick"
+            else:
+                output.remove_temporary(temporary)
+                pending = []
+                remaining = min(args.max_source_bytes, args.max_output_bytes)
+                try:
+                    for path, _size in images:
+                        try:
+                            temp_copy, copied = output.stream_copy_to_temporary(
+                                path,
+                                suffix=path.suffix + ".copy",
+                                maximum=remaining,
+                            )
+                        except GuacOutputPathError as error:
+                            if "copy exceeds configured byte limit" in str(error):
+                                raise InputLimitError("fallback_output_bytes") from error
+                            raise
+                        remaining -= copied
+                        pending.append((temp_copy, path.name))
+                    for temp_copy, destination_name in pending:
+                        output.publish_temporary(
+                            temp_copy,
+                            destination_name,
+                            maximum=args.max_output_bytes,
+                        )
+                except BaseException:
+                    for temp_copy, _destination_name in pending:
+                        output.remove_temporary(temp_copy)
+                    raise
+                manifest.update(
+                    {
+                        "status": "copied_fallback",
+                        "renderer": "copy",
+                        "output_bytes": min(args.max_source_bytes, args.max_output_bytes)
+                        - remaining,
+                    }
+                )
+                record_result(output, manifest)
+                output.write_text(
+                    "README.txt",
+                    "Pillow/ImageMagick unavailable; copied recent tiles only.\n"
+                )
+                print(str(outdir))
+                return 0
+        output_bytes = publish_output(
+            output, temporary, "contact_sheet.jpg", args.max_output_bytes
+        )
+        manifest.update(
+            {
+                "status": "ok",
+                "renderer": renderer,
+                "output_bytes": output_bytes,
+                "sheet": str(outdir / "contact_sheet.jpg"),
+            }
+        )
+        record_result(output, manifest)
+    except Exception as error:
+        output.remove_temporary(temporary)
+        reason = str(error) if isinstance(error, InputLimitError) else "renderer_error"
+        manifest.update({"status": "input_limit" if isinstance(error, InputLimitError) else "tool_failed", "reason": reason})
+        record_result(output, manifest)
+        return 2
+    finally:
+        output.remove_temporary(temporary)
+    print(str(outdir))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

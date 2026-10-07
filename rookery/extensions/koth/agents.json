@@ -1,0 +1,15 @@
+[
+  {
+    "admission": {
+      "capability_gap": "bounded koth operator work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_koth_operator:one-owner-one-report-path",
+      "evidence": "Rookery optional role catalog entry at extensions/koth/agents/ctf_koth_operator.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_koth_operator",
+    "requires_all": [],
+    "requires_any": [
+      "koth"
+    ],
+    "source": "extensions/koth/agents/ctf_koth_operator.toml"
+  }
+]

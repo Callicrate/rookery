@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+echo "closeout is owned by ./go stop; use ./go stop" >&2
+exit 2

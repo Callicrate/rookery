@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+export ROOKERY_ROOT="$ROOT"
+# ``-I`` ignores every ambient Python startup setting (including PYTHONPATH
+# and PYTHONHOME); ``-S`` prevents sitecustomize/usercustomize from loading
+# before the bootstrap installs only Rookery's shipped library path.
+exec python3 -I -S -B "$ROOT/bin/rookery-bootstrap.py" "$@"

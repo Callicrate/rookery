@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "rookery/lib"))
+from rookery.verdict_parser import parse_file, parse_verdict
+
+cases = {
+    "accepted.json": "accepted",
+    "rejected_http200.json": "rejected",
+    "already_captured.json": "already-accepted",
+    "auth_failed.json": "auth_blocked",
+    "transport_success_unknown.json": "unknown",
+    "non_scoring_join.json": "non_scoring",
+}
+base = ROOT / "tests/fixtures/verdict"
+failed = []
+for name, want in cases.items():
+    got = parse_file(base / name).verdict
+    print(f"{name}: {got}")
+    if got != want:
+        failed.append((name, want, got))
+# Nested stdout fixture should reject when parsed through flag-review helper semantics; direct parser sees transport first, so test nested manually.
+obj = json.loads((base / "command_stdout_reject.json").read_text())
+try:
+    nested = json.loads(obj["stdout"])
+except Exception:
+    nested = obj["stdout"]
+got = parse_verdict(nested, process_returncode=obj.get("returncode")).verdict
+print(f"command_stdout_reject nested: {got}")
+if got != "rejected":
+    failed.append(("command_stdout_reject nested", "rejected", got))
+if failed:
+    print("FAILED", failed, file=sys.stderr)
+    raise SystemExit(1)
+print("verdict parser tests ok")

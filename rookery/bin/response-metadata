@@ -1,0 +1,53 @@
+#!/usr/bin/env -S python3 -I -B
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "lib"))
+from rookery.portable.util import (  # noqa: E402
+    ensure_private_dir as _ensure_private_dir,
+    ensure_private_file as _ensure_private_file,
+)
+from rookery.verdict_parser import attach_metadata  # noqa: E402
+
+
+def private_dir(p: Path):
+    _ensure_private_dir(p)
+
+
+def write_text(p: Path, text: str):
+    _ensure_private_dir(p.parent)
+    _ensure_private_file(p)
+    p.write_text(text, encoding="utf-8")
+    os.chmod(p, 0o600)
+
+
+def main():
+    os.umask(0o077)
+    ap = argparse.ArgumentParser(
+        description="Attach scorer verdict and sibling request metadata to a platform response artifact."
+    )
+    ap.add_argument("response_path")
+    ap.add_argument(
+        "--write",
+        action="store_true",
+        help="write <response>.metadata.json next to response",
+    )
+    args = ap.parse_args()
+    out = attach_metadata(args.response_path)
+    if args.write:
+        p = Path(args.response_path)
+        mp = p.with_suffix(p.suffix + ".metadata.json")
+        write_text(mp, json.dumps(out, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+        out["written"] = str(mp)
+    print(json.dumps(out, indent=2, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

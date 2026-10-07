@@ -1,0 +1,76 @@
+#!/usr/bin/env -S python3 -I -B
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "lib"))
+from rookery.verdict_parser import (  # noqa: E402
+    attach_metadata,
+    exit_code_for_verdict,
+    parse_file,
+    parse_verdict,
+)
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Parse scorer truth from platform/wrapper responses. Structured fields beat text. HTTP 200 is not acceptance."
+    )
+    ap.add_argument("path", nargs="?", default="-", help="response JSON/text path, or stdin")
+    ap.add_argument("--http-status", type=int)
+    ap.add_argument("--returncode", type=int)
+    ap.add_argument(
+        "--metadata",
+        action="store_true",
+        help="also attach sibling request.json metadata",
+    )
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument(
+        "--fail-closed",
+        action="store_true",
+        help="exit 0 only for accepted/already-accepted",
+    )
+    ap.add_argument("--max-bytes", type=int, default=8 * 1024 * 1024)
+    args = ap.parse_args()
+    if args.path == "-":
+        if args.max_bytes <= 0:
+            raise ValueError("--max-bytes must be positive")
+        raw_bytes = sys.stdin.buffer.read(args.max_bytes + 1)
+        if len(raw_bytes) > args.max_bytes:
+            raise ValueError("verdict stdin exceeds configured byte limit")
+        raw = raw_bytes.decode("utf-8", errors="replace")
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            obj = raw
+        verdict = parse_verdict(obj, http_status=args.http_status, process_returncode=args.returncode)
+        out = verdict.to_dict()
+    else:
+        p = Path(args.path)
+        if args.metadata:
+            out = attach_metadata(p)
+        else:
+            verdict = parse_file(
+                p,
+                http_status=args.http_status,
+                process_returncode=args.returncode,
+                max_bytes=args.max_bytes,
+            )
+            out = verdict.to_dict()
+    if args.json or args.metadata:
+        print(json.dumps(out, indent=2, ensure_ascii=False, sort_keys=True))
+    else:
+        print(
+            f"verdict={out.get('verdict')} scorer_truth={out.get('scorer_truth')} transport_ok={out.get('transport_ok')} confidence={out.get('confidence')} reason={out.get('reason')}"
+        )
+    if args.fail_closed:
+        return exit_code_for_verdict(out.get("verdict", "unknown"))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

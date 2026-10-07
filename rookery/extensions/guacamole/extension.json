@@ -1,0 +1,92 @@
+{
+  "agents": "agents.json",
+  "docs": "README.md",
+  "environment_schema": [
+    {
+      "name": "GUAC_REMOTE_FILE_EXPORT_ARGV",
+      "target": null,
+      "type": "argv"
+    },
+    {
+      "name": "GUAC_CLIPBOARD_EXPORT_ARGV",
+      "target": null,
+      "type": "argv"
+    },
+    {
+      "name": "GUAC_BASE64_EXPORT_ARGV",
+      "target": null,
+      "type": "argv"
+    },
+    {
+      "name": "GUAC_HTTP_EXPORT_ARGV",
+      "target": null,
+      "type": "argv"
+    },
+    {
+      "name": "GUAC_SCREENSHOT_TRANSCRIBE_ARGV",
+      "target": null,
+      "type": "argv"
+    },
+    {
+      "name": "GUAC_TERMINAL_CAPTURE_ARGV",
+      "target": null,
+      "type": "argv"
+    },
+    {
+      "name": "GUAC_SSH_EXEC_ARGV",
+      "target": null,
+      "type": "argv"
+    },
+    {
+      "name": "GUAC_REMOTE_FILE_EXPORT_ENV_KEYS",
+      "target": null,
+      "type": "environment_name_array"
+    },
+    {
+      "name": "GUAC_CLIPBOARD_EXPORT_ENV_KEYS",
+      "target": null,
+      "type": "environment_name_array"
+    },
+    {
+      "name": "GUAC_BASE64_EXPORT_ENV_KEYS",
+      "target": null,
+      "type": "environment_name_array"
+    },
+    {
+      "name": "GUAC_HTTP_EXPORT_ENV_KEYS",
+      "target": null,
+      "type": "environment_name_array"
+    },
+    {
+      "name": "GUAC_SCREENSHOT_TRANSCRIBE_ENV_KEYS",
+      "target": null,
+      "type": "environment_name_array"
+    },
+    {
+      "name": "GUAC_TERMINAL_CAPTURE_ENV_KEYS",
+      "target": null,
+      "type": "environment_name_array"
+    },
+    {
+      "name": "GUAC_SSH_EXEC_ENV_KEYS",
+      "target": null,
+      "type": "environment_name_array"
+    },
+    {
+      "name": "GUAC_STREAM_DIR",
+      "target": null,
+      "type": "string"
+    },
+    {
+      "maximum": 3600,
+      "minimum": 1,
+      "name": "GUAC_EXEC_TIMEOUT",
+      "target": null,
+      "type": "integer"
+    }
+  ],
+  "id": "guacamole",
+  "overlay": "overlay.json",
+  "schema_version": "1",
+  "tools": "tools.json"
+}

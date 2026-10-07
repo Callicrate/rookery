@@ -1,0 +1,31 @@
+#!/usr/bin/env -S python3 -I -B
+import json
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+
+root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(root / "lib"))
+from rookery.portable.store import EventStore  # noqa: E402
+
+store = EventStore(root)
+args = sys.argv[1:]
+if not args:
+    raise SystemExit("usage: challenge-state <id> [--update key=value ...]")
+cid = args[0]
+if "--update" in args:
+    i = args.index("--update")
+    payload = {"id": cid}
+    for item in args[i + 1 :]:
+        if "=" in item:
+            k, v = item.split("=", 1)
+            payload[k] = v
+    store.append("challenge.classify", payload, actor="coordinator")
+    store.rebuild()
+print(
+    json.dumps(
+        store.rebuild()["current"]["challenges"].get(cid, {"id": cid, "status": "unknown"}),
+        indent=2,
+    )
+)

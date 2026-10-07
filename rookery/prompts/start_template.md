@@ -1,0 +1,1 @@
+/goal Resolve the selected event profile and autonomously solve within the compiled scope. Use bounded Codex subagents, preserve exact evidence, propose scoring actions only, and create solve capsules for accepted objectives.

@@ -1,0 +1,128 @@
+#!/usr/bin/env -S python3 -I -B
+"""Classify platform/API artifacts as read-only or potentially mutating.
+
+Designed for GraphQL/platform helpers. It is intentionally conservative: if it
+sees mutations, StartLabAttempt/reset/submit/complete/claim/kill/write-like
+terms, it marks the artifact mutating unless an operator explicitly overrides.
+"""
+
+from __future__ import annotations
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+MUTATION_PATTERNS = [
+    r"\bmutation\b",
+    r"\bStartLabAttempt\b",
+    r"\bstartLabAttempt\b",
+    r"\bstart[A-Za-z0-9_]*Attempt\b",
+    r"\bReset[A-Za-z0-9_]*\b",
+    r"\breset[A-Za-z0-9_]*\b",
+    r"\bSubmit[A-Za-z0-9_]*\b",
+    r"\bsubmit[A-Za-z0-9_]*\b",
+    r"\bComplete[A-Za-z0-9_]*\b",
+    r"\bcomplete[A-Za-z0-9_]*\b",
+    r"\bClaim[A-Za-z0-9_]*\b",
+    r"\bclaim[A-Za-z0-9_]*\b",
+    r"\bKill[A-Za-z0-9_]*\b",
+    r"\bkill[A-Za-z0-9_]*\b",
+    r"\bWrite[A-Za-z0-9_]*\b",
+    r"\bwrite[A-Za-z0-9_]*\b",
+    r"\bDelete[A-Za-z0-9_]*\b",
+    r"\bdelete[A-Za-z0-9_]*\b",
+    r"\bCreate[A-Za-z0-9_]*\b",
+    r"\bcreate[A-Za-z0-9_]*\b",
+    r"\bUpdate[A-Za-z0-9_]*\b",
+    r"\bupdate[A-Za-z0-9_]*\b",
+]
+READ_PATTERNS = [
+    r"\bquery\b",
+    r"\bsubscription\b",
+    r"\bviewer\b",
+    r"\bnode\b",
+    r"\bselectedLab\b",
+    r"\bcurrent[A-Za-z0-9_]*\b",
+]
+
+
+def read_text(path: str, max_bytes: int) -> str:
+    if max_bytes <= 0:
+        raise ValueError("input byte limit must be positive")
+    if path == "-":
+        raw = sys.stdin.buffer.read(max_bytes + 1)
+        if len(raw) > max_bytes:
+            raise ValueError("mutation-audit stdin exceeds configured byte limit")
+        return raw.decode("utf-8", errors="replace")
+    source = Path(path)
+    if source.stat().st_size > max_bytes:
+        raise ValueError("mutation-audit file exceeds configured byte limit")
+    return source.read_text(errors="replace")
+
+
+def classify(text: str) -> dict:
+    hits = []
+    for pat in MUTATION_PATTERNS:
+        for m in re.finditer(pat, text, re.I):
+            hits.append({"pattern": pat, "match": m.group(0), "start": m.start()})
+    read_hits = []
+    for pat in READ_PATTERNS:
+        for m in re.finditer(pat, text, re.I):
+            read_hits.append({"pattern": pat, "match": m.group(0), "start": m.start()})
+    # A GraphQL document without explicit mutation but with submit/start-like field is still mutating.
+    verdict = "mutating" if hits else "read-only-or-unknown"
+    risk = "high" if hits else ("low" if read_hits else "unknown")
+    return {
+        "verdict": verdict,
+        "risk": risk,
+        "mutation_hits": hits[:100],
+        "read_hints": read_hits[:100],
+        "mutation_hit_count": len(hits),
+        "read_hint_count": len(read_hits),
+    }
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="Audit whether a platform/API helper appears read-only or mutating."
+    )
+    ap.add_argument(
+        "paths", nargs="*", default=["-"], help="files to inspect, or - for stdin"
+    )
+    ap.add_argument(
+        "--allow-mutation",
+        action="store_true",
+        help="return success even if mutation-like terms are present",
+    )
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--max-bytes", type=int, default=8 * 1024 * 1024)
+    args = ap.parse_args()
+    results = []
+    overall_mutating = False
+    for path in args.paths:
+        text = read_text(path, args.max_bytes)
+        rec = {"path": path, **classify(text)}
+        if rec["verdict"] == "mutating":
+            overall_mutating = True
+        results.append(rec)
+    summary = {
+        "ok": not overall_mutating or args.allow_mutation,
+        "mutating": overall_mutating,
+        "results": results,
+    }
+    if args.json:
+        print(json.dumps(summary, indent=2, ensure_ascii=False))
+    else:
+        print(
+            f"mutation_audit={'mutating' if overall_mutating else 'read-only-or-unknown'}"
+        )
+        for r in results:
+            print(f"- {r['path']}: {r['verdict']} hits={r['mutation_hit_count']}")
+            for h in r["mutation_hits"][:10]:
+                print(f"  * {h['match']} ({h['pattern']})")
+    return 0 if (not overall_mutating or args.allow_mutation) else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

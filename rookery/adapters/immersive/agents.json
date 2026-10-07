@@ -1,0 +1,15 @@
+[
+  {
+    "admission": {
+      "capability_gap": "bounded actioncable cluster scout work requires a distinct task card or evidence contract",
+      "distinct_contract": "ctf_actioncable_cluster_scout:one-owner-one-report-path",
+      "evidence": "Rookery optional role catalog entry at adapters/immersive/agents/ctf_actioncable_cluster_scout.toml; retained for profile-gated discovery rather than loaded globally"
+    },
+    "id": "ctf_actioncable_cluster_scout",
+    "requires_all": [],
+    "requires_any": [
+      "adapter:immersive"
+    ],
+    "source": "adapters/immersive/agents/ctf_actioncable_cluster_scout.toml"
+  }
+]

@@ -1,0 +1,114 @@
+{
+  "agents": "agents.json",
+  "class": "CTFdBrowserGatewayAdapter",
+  "docs": "README.md",
+  "env_example": "env.example",
+  "environment_schema": [
+    {
+      "name": "CTFD_URL",
+      "target": null,
+      "type": "https_origin"
+    },
+    {
+      "credential": true,
+      "legacy_import": false,
+      "name": "CTFD_TOKEN",
+      "target": null,
+      "type": "string"
+    },
+    {
+      "legacy_import": false,
+      "name": "CTFD_NETWORK_ENV_KEYS",
+      "target": null,
+      "type": "environment_name_array"
+    },
+    {
+      "name": "ADAPTER_CONFIG_BASE_URL",
+      "target": "adapter.config.base_url",
+      "type": "https_origin"
+    },
+    {
+      "name": "ADAPTER_CONFIG_TOKEN_ENV",
+      "target": "adapter.config.token_env",
+      "type": "environment_name"
+    },
+    {
+      "choices": [
+        "user",
+        "team"
+      ],
+      "name": "ADAPTER_CONFIG_SCORING_MODE",
+      "target": "adapter.config.scoring_mode",
+      "type": "enum"
+    },
+    {
+      "name": "ADAPTER_CONFIG_EXPECTED_ACCOUNT_ID",
+      "target": "adapter.config.expected_account_id",
+      "type": "identifier"
+    },
+    {
+      "name": "ADAPTER_CONFIG_EXPECTED_TEAM_ID",
+      "target": "adapter.config.expected_team_id",
+      "type": "identifier"
+    },
+    {
+      "name": "ADAPTER_CONFIG_CSRF_PAGE_PATH",
+      "target": "adapter.config.csrf_page_path",
+      "type": "absolute_path"
+    },
+    {
+      "maximum": 300,
+      "minimum": 1,
+      "name": "ADAPTER_CONFIG_SESSION_LEASE_SECONDS",
+      "target": "adapter.config.session_lease_seconds",
+      "type": "integer"
+    },
+    {
+      "maximum": 120,
+      "minimum": 1,
+      "name": "ADAPTER_CONFIG_TIMEOUT",
+      "target": "adapter.config.timeout",
+      "type": "integer"
+    },
+    {
+      "maximum": 16777216,
+      "minimum": 1024,
+      "name": "ADAPTER_CONFIG_MAX_RESPONSE_BYTES",
+      "target": "adapter.config.max_response_bytes",
+      "type": "integer"
+    },
+    {
+      "name": "ADAPTER_CONFIG_BROWSER_SUPPORT_ORIGINS",
+      "target": "adapter.config.browser_support_origins",
+      "type": "https_origin_array"
+    }
+  ],
+  "environment_requirements": {
+    "all": [
+      "ADAPTER_CONFIG_SCORING_MODE",
+      "ADAPTER_CONFIG_EXPECTED_ACCOUNT_ID",
+      "BROWSER_CDP_URL",
+      "BROWSER_GATEWAY_URL"
+    ],
+    "any": [
+      ["CTFD_URL", "ADAPTER_CONFIG_BASE_URL"]
+    ],
+    "same": [["CTFD_URL", "ADAPTER_CONFIG_BASE_URL"]],
+    "fixed": [{"name": "BROWSER_MODE", "value": "cdp"}],
+    "indirect": [{"selector": "ADAPTER_CONFIG_TOKEN_ENV", "default": "CTFD_TOKEN"}],
+    "conditional": [
+      {
+        "when": "ADAPTER_CONFIG_SCORING_MODE",
+        "equals": "team",
+        "require": "ADAPTER_CONFIG_EXPECTED_TEAM_ID"
+      }
+    ]
+  },
+  "id": "ctfd_browser_gateway",
+  "platform_origin_environment": ["ADAPTER_CONFIG_BASE_URL", "CTFD_URL"],
+  "platform_support_origins_environment": "ADAPTER_CONFIG_BROWSER_SUPPORT_ORIGINS",
+  "module": "adapter.py",
+  "profile": "profile.json",
+  "schema_version": "1",
+  "tools": "tools.json"
+}

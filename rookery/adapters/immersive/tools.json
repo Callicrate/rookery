@@ -1,0 +1,100 @@
+[
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded immersive answer flow capability when the selected event surface requires platform-sessions.",
+      "distinct_contract": "tool:immersive-answer-flow",
+      "evidence": "Rookery optional implementation at adapters/immersive/bin/immersive-answer-flow; selected only by capability/profile registry fixtures."
+    },
+    "id": "immersive-answer-flow",
+    "path": "adapters/immersive/bin/immersive-answer-flow",
+    "purpose": "immersive answer flow",
+    "requires_all": [],
+    "requires_any": [
+      "adapter:immersive"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded immersive cluster capture capability when the selected event surface requires platform-sessions.",
+      "distinct_contract": "tool:immersive-cluster-capture",
+      "evidence": "Rookery optional implementation at adapters/immersive/bin/immersive-cluster-capture; selected only by capability/profile registry fixtures."
+    },
+    "id": "immersive-cluster-capture",
+    "path": "adapters/immersive/bin/immersive-cluster-capture",
+    "purpose": "immersive cluster capture",
+    "requires_all": [],
+    "requires_any": [
+      "adapter:immersive"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded immersive cookie filter capability when the selected event surface requires platform-sessions.",
+      "distinct_contract": "tool:immersive-cookie-filter",
+      "evidence": "Rookery optional implementation at adapters/immersive/bin/immersive-cookie-filter; selected only by capability/profile registry fixtures."
+    },
+    "id": "immersive-cookie-filter",
+    "path": "adapters/immersive/bin/immersive-cookie-filter",
+    "purpose": "immersive cookie filter",
+    "requires_all": [],
+    "requires_any": [
+      "adapter:immersive"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded immersive ledger import capability when the selected event surface requires platform-sessions.",
+      "distinct_contract": "tool:immersive-ledger-import",
+      "evidence": "Rookery optional implementation at adapters/immersive/bin/immersive-ledger-import; selected only by capability/profile registry fixtures."
+    },
+    "id": "immersive-ledger-import",
+    "path": "adapters/immersive/bin/immersive-ledger-import",
+    "purpose": "immersive ledger import",
+    "requires_all": [],
+    "requires_any": [
+      "adapter:immersive"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded immersive selected lab refresh capability when the selected event surface requires platform-sessions.",
+      "distinct_contract": "tool:immersive-selected-lab-refresh",
+      "evidence": "Rookery optional implementation at adapters/immersive/bin/immersive-selected-lab-refresh; selected only by capability/profile registry fixtures."
+    },
+    "id": "immersive-selected-lab-refresh",
+    "path": "adapters/immersive/bin/immersive-selected-lab-refresh",
+    "purpose": "immersive selected lab refresh",
+    "requires_all": [],
+    "requires_any": [
+      "adapter:immersive"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded immersive submit answer capability when the selected event surface requires platform-sessions.",
+      "distinct_contract": "tool:immersive-submit-answer",
+      "evidence": "Rookery optional implementation at adapters/immersive/bin/immersive-submit-answer; selected only by capability/profile registry fixtures."
+    },
+    "id": "immersive-submit-answer",
+    "path": "adapters/immersive/bin/immersive-submit-answer",
+    "purpose": "immersive submit answer",
+    "requires_all": [],
+    "requires_any": [
+      "adapter:immersive"
+    ]
+  },
+  {
+    "admission": {
+      "capability_gap": "Provides the bounded immersive submit current capability when the selected event surface requires platform-sessions.",
+      "distinct_contract": "tool:immersive-submit-current",
+      "evidence": "Rookery optional implementation at adapters/immersive/bin/immersive-submit-current; selected only by capability/profile registry fixtures."
+    },
+    "id": "immersive-submit-current",
+    "path": "adapters/immersive/bin/immersive-submit-current",
+    "purpose": "immersive submit current",
+    "requires_all": [],
+    "requires_any": [
+      "adapter:immersive"
+    ]
+  }
+]
